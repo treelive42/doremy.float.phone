@@ -1044,6 +1044,12 @@
     width: 14.87vw;
     height: 14.87vw;
   }
+  /* 图标项高度跟随网格行高：地址栏显示时 dvh 变矮、行高收缩，桌面固定
+     min-height:84px 会把行撑破、图标下移错位。解除下限后由 grid 默认
+     stretch 让图标贴行顶，标签自然跟随，不再互相挤压。 */
+  .icon-grid .icon-item {
+    min-height: 0;
+  }
   .dock {
     /* 同样按数量自适应；count=4 时等于原 90.77vw。 */
     width: min(calc((var(--dock-count) * var(--slot-size)) + ((var(--dock-count) - 1) * var(--slot-gap-x)) + 30px), calc(100% - 8px));
@@ -1056,7 +1062,8 @@
 
 /* ── Mobile responsive ── */
 
-@media (max-width: 500px) and (hover: none) and (pointer: coarse) {
+@media (max-width: 500px) and (hover: none) and (pointer: coarse),
+       (max-height: 500px) and (orientation: landscape) and (hover: none) and (pointer: coarse) {
 
   /* 用户在设置里显式开启「显示系统状态栏」且运行时不在全屏时，控制器才会挂
      data-pwa-display-mode 标记（见 pwa-manifest-injector）：此时所有 App 共用系统
@@ -1085,20 +1092,20 @@
 
   :root {
     --phone-screen-width: 100vw;
-    --phone-screen-height: 100lvh;
+    --phone-screen-height: 100dvh;
   }
 
   html,
   body {
     overflow: hidden;
     width: 100%;
-    height: 100lvh;
+    height: 100dvh;
     background: var(--c-page-body-bg);
   }
 
   .app-root {
     width: 100vw;
-    height: 100lvh;
+    height: 100dvh;
     padding: 0;
     display: flex;
     justify-content: flex-start;
@@ -1157,7 +1164,7 @@
 
   .app-root.splash-root {
     width: 100vw;
-    height: 100lvh;
+    height: 100dvh;
     margin: 0;
     padding: 0;
     display: flex;
@@ -1175,6 +1182,25 @@
   .splash-shell-wrap .phone-case,
   .splash-shell-wrap .phone-frame {
     width: var(--phone-screen-width);
+  }
+}
+
+/* ── 横屏矮视口：桌面 6 行网格放不下，允许 workspace 纵向滚动 ──
+   横向翻页仍由 JS 手势处理（touch-action: pan-y 允许纵向原生滚动），
+   overflow-y: auto 让超出的行可以滚到，dock 固定在底部不滚。 */
+@media (max-height: 500px) and (orientation: landscape) and (hover: none) and (pointer: coarse) {
+  .phone-workspace:not(.app-open) {
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+  }
+  .phone-workspace:not(.app-open) .phone-swipe-layer {
+    flex: none;
+    height: auto;
+  }
+  .phone-workspace:not(.app-open) .icon-grid {
+    grid-template-rows: repeat(6, auto);
+    align-content: start;
   }
 }
 
