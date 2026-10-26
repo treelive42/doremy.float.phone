@@ -127,6 +127,7 @@ import { WidgetRenderer } from "@/components/widgets/widget-renderer";
 import type { DIYWidgetTemplate } from "@/lib/widget-types";
 import { DebugPromptPanel } from "@/components/debug-prompt-panel";
 import { QuickActionFloat } from "@/components/quick-action-float";
+import { APP_BACK_SWIPE_EVENT, type AppBackSwipeDetail } from "@/lib/app-back-swipe";
 import { CHAT_MESSAGE_PUSHED_EVENT, CHAT_REQUEST_REPLY_EVENT, findChatSessionById, hydrateChatStorage, loadChatSessions, loadChatMessages, pushChatMessage, type ChatMessage, type ChatSession } from "@/lib/chat-storage";
 import { ensureGlobalBindingDefaults, resolveUserIdentity } from "@/lib/settings-storage";
 import { loadCharacters } from "@/lib/character-storage";
@@ -1258,6 +1259,68 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [slotRowStep, setSlotRowStep] = useState<number | null>(null);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const glassBusyTimerRef = useRef<number>(0);
+
+  // ── App 内边缘横滑返回 ──
+  // 仅当有 App 打开时生效：从手机屏左/右边缘向内横滑（起点在边缘 24px 内），
+  // 派发 APP_BACK_SWIPE_EVENT 让 App 自行逐级返回；无人处理则关闭 App 回桌面。
+  // 桌面态（activeApp 为空）不生效——桌面左右滑仍走翻页手势，互不干扰。
+  useEffect(() => {
+    if (!activeApp) return;
+    const shell = shellRef.current;
+    if (!shell) return;
+
+    // 收窄 activeApp 为非 null（effect 顶部已 return），闭包内类型安全
+    const appId = activeApp;
+
+    const EDGE_WIDTH = 24;
+    const BACK_THRESHOLD = 56;
+
+    let tracking: { pointerId: number; startX: number; startY: number; edge: "left" | "right" } | null = null;
+    let fired = false;
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.pointerType === "mouse") return;
+      const rect = shell.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const relX = e.clientX - rect.left;
+      let edge: "left" | "right" | null = null;
+      if (relX <= EDGE_WIDTH) edge = "left";
+      else if (relX >= rect.width - EDGE_WIDTH) edge = "right";
+      if (!edge) return;
+      tracking = { pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, edge };
+      fired = false;
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (!tracking || e.pointerId !== tracking.pointerId || fired) return;
+      const dx = e.clientX - tracking.startX;
+      const dy = e.clientY - tracking.startY;
+      // 横向主导才认定为返回，避免和 App 内纵向滚动冲突
+      if (Math.abs(dx) < 12 || Math.abs(dx) < Math.abs(dy) * 1.2) return;
+      const inward = tracking.edge === "left" ? dx > 0 : dx < 0;
+      if (!inward || Math.abs(dx) < BACK_THRESHOLD) return;
+      fired = true;
+      tracking = null;
+      const detail: AppBackSwipeDetail = { appId, handled: false };
+      window.dispatchEvent(new CustomEvent(APP_BACK_SWIPE_EVENT, { detail }));
+      if (!detail.handled) setActiveApp(null);
+    };
+
+    const stopTracking = (e: PointerEvent) => {
+      if (tracking && e.pointerId === tracking.pointerId) tracking = null;
+    };
+
+    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("pointermove", onPointerMove, true);
+    window.addEventListener("pointerup", stopTracking, true);
+    window.addEventListener("pointercancel", stopTracking, true);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("pointermove", onPointerMove, true);
+      window.removeEventListener("pointerup", stopTracking, true);
+      window.removeEventListener("pointercancel", stopTracking, true);
+    };
+  }, [activeApp, setActiveApp]);
   const iconGridRef = useRef<HTMLElement | null>(null);
   const swipeRef = useRef<{
     startX: number;
@@ -4134,6 +4197,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
           }}
           initialSessionId={chatInitSessionId}
           onSessionChange={setActiveChatSession}
+          backSwipeEnabled
         />
       );
     }

@@ -17,6 +17,7 @@ import { formatXiaohongshuShareForPrompt, type ChatSharePayload } from "@/lib/ch
 import { CHAT_OPEN_SESSION_EVENT, CHAT_OPEN_ADD_CONTACT_EVENT } from "@/lib/chat-notification-events";
 import { CHAT_SESSIONS_MERGED_EVENT, type ChatSessionsMergedDetail } from "@/lib/chat-session-merge";
 import { getMascotSettingsSnapshot } from "@/lib/mascot-settings";
+import { APP_BACK_SWIPE_EVENT, type AppBackSwipeDetail } from "@/lib/app-back-swipe";
 
 type TabKey = "messages" | "contacts" | "feeds" | "me";
 
@@ -26,9 +27,11 @@ export type PhoneChatAppProps = {
     onSessionChange?: (session: ChatSession | null) => void;
     sharePayload?: ChatSharePayload | null;
     onShareDone?: () => void;
+    /** 仅前台主聊天 App 传 true：启用「边缘横滑逐级返回」（聊天室/桌宠聊天室 → 列表）。 */
+    backSwipeEnabled?: boolean;
 };
 
-export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSessionId, onSessionChange, sharePayload, onShareDone }: PhoneChatAppProps) {
+export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSessionId, onSessionChange, sharePayload, onShareDone, backSwipeEnabled }: PhoneChatAppProps) {
     const [activeTab, setActiveTab] = useState<TabKey>("messages");
     const [activeSession, setActiveSession] = useState<ChatSession | null>(null);
     const [activeMascot, setActiveMascot] = useState(false);
@@ -233,6 +236,30 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
         setActiveMascot(true);
         setActiveTab("messages");
     };
+
+    // 边缘横滑返回：仅前台主聊天 App（backSwipeEnabled）响应。
+    // 返回栈从深到浅：桌宠聊天室 → 普通聊天室 → 会话列表；到顶层后不处理，
+    // 由壳层兜底关闭 App 回桌面。迷你聊天窗不传 backSwipeEnabled，不受影响。
+    useEffect(() => {
+        if (!backSwipeEnabled) return;
+        const onBackSwipe = (e: Event) => {
+            const detail = (e as CustomEvent<AppBackSwipeDetail>).detail;
+            if (!detail || detail.appId !== "chat") return;
+            if (activeMascot) {
+                setActiveMascot(false);
+                detail.handled = true;
+                return;
+            }
+            if (activeSession) {
+                setActiveSession(null);
+                detail.handled = true;
+                return;
+            }
+            // 顶层：不处理，交给壳层关闭 App
+        };
+        window.addEventListener(APP_BACK_SWIPE_EVENT, onBackSwipe);
+        return () => window.removeEventListener(APP_BACK_SWIPE_EVENT, onBackSwipe);
+    }, [backSwipeEnabled, activeMascot, activeSession]);
 
     // Listen for CSS updates from settings panel
     useEffect(() => {
