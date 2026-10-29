@@ -28,7 +28,10 @@ import {
   moveCharacterToWorld,
   renameCharacterWorldGroup,
   updateCharacterWorldDescription,
+  getCurrentWorldId,
+  setCurrentWorldId as persistCurrentWorldId,
   CHARACTER_WORLDS_UPDATED_EVENT,
+  CURRENT_WORLD_CHANGED_EVENT,
   DEFAULT_CHARACTER_WORLD_ID,
   type CharacterWorldGroup,
 } from "@/lib/character-world-storage";
@@ -62,7 +65,6 @@ type CanvasRelationLine = { key: string; aId: string; bId: string; labels: strin
 
 // 每个世界一张画布：平移缩放记忆按世界分 key（默认世界沿用旧 key，存量零迁移）
 const PAN_STORAGE_BASE_KEY = 'ai_phone_canvas_pan_v2';
-const WORLD_TAB_KEY = 'ai_phone_character_app_world_v1';
 const CHARACTER_AVATAR_MAX_BYTES = 600 * 1024;
 const CHARACTER_AVATAR_COMPRESSION_FALLBACKS = [
   { maxSize: 1280, quality: 0.8 },
@@ -202,21 +204,27 @@ export function PhoneCharacterApp({ onClose, onNotice }: PhoneCharacterAppProps)
   const [pendingPolaroidStyle, setPendingPolaroidStyle] = useState<number>(0);
 
   // ── 世界卷宗：分组数据 + 当前打开的卷宗（持久记忆） ──
+  // 当前世界存进 lib/character-world-storage 的共享记忆里：微信那边的会话列表/通讯录
+  // 也会读同一个值，两边切换任一入口都会通过 CURRENT_WORLD_CHANGED_EVENT 互相跟上。
   const [worldGroups, setWorldGroups] = useState<CharacterWorldGroup[]>(() => loadCharacterWorldGroups());
-  const [currentWorldId, setCurrentWorldId] = useState<string>(() => {
-    const saved = typeof window !== "undefined" ? kvGet(WORLD_TAB_KEY) : null;
-    return saved || DEFAULT_CHARACTER_WORLD_ID;
-  });
+  const [currentWorldId, setCurrentWorldId] = useState<string>(() => getCurrentWorldId());
   useEffect(() => {
     const reload = () => setWorldGroups(loadCharacterWorldGroups());
+    // 微信通讯录/会话列表切世界后，这里的画布也要切到同一份卷宗（双向同步）
+    const reloadCurrent = () => setCurrentWorldId(getCurrentWorldId());
     window.addEventListener(CHARACTER_WORLDS_UPDATED_EVENT, reload);
-    return () => window.removeEventListener(CHARACTER_WORLDS_UPDATED_EVENT, reload);
+    window.addEventListener(CURRENT_WORLD_CHANGED_EVENT, reloadCurrent);
+    return () => {
+      window.removeEventListener(CHARACTER_WORLDS_UPDATED_EVENT, reload);
+      window.removeEventListener(CURRENT_WORLD_CHANGED_EVENT, reloadCurrent);
+    };
   }, []);
   // 记忆的世界可能已被删除 → 回落默认卷宗
   const safeWorldId = worldGroups.some(g => g.id === currentWorldId) ? currentWorldId : DEFAULT_CHARACTER_WORLD_ID;
   function selectWorldId(worldId: string) {
     setCurrentWorldId(worldId);
-    try { kvSet(WORLD_TAB_KEY, worldId); } catch { }
+    // 持久化 + 广播：微信通讯录与会话列表据此自动切到同一个世界
+    persistCurrentWorldId(worldId);
   }
 
   function updateChars(next: Character[]) {

@@ -6,7 +6,11 @@ import type { MomentComment, MomentLike, MomentPost } from "./moments-types";
 
 const CHARACTER_WORLDS_KEY = "ai_phone_character_worlds_v1";
 export const CHARACTER_WORLDS_UPDATED_EVENT = "character-worlds-updated";
+/** 切换「当前世界」时广播：角色画布、聊天会话列表、通讯录共用同一份记忆并互相跟上 */
+export const CURRENT_WORLD_CHANGED_EVENT = "character-current-world-changed";
 export const DEFAULT_CHARACTER_WORLD_ID = "world_default";
+// 与角色 App 的画布 tab 共用同一个 key（存量用户的记忆零迁移）
+const CURRENT_WORLD_KEY = "ai_phone_character_app_world_v1";
 
 registerKvMigration(CHARACTER_WORLDS_KEY);
 
@@ -150,6 +154,41 @@ export function saveCharacterWorldGroups(groups: CharacterWorldGroup[]): void {
     if (!isBrowser()) return;
     kvSet(CHARACTER_WORLDS_KEY, JSON.stringify(normalized));
     dispatchUpdated();
+}
+
+// ── 当前世界（跨 App 共享的「正在看哪份卷宗」记忆） ──
+
+/** 读取当前世界 id（未设置时返回默认世界） */
+export function getCurrentWorldId(): string {
+    if (!isBrowser()) return DEFAULT_CHARACTER_WORLD_ID;
+    const saved = (kvGet(CURRENT_WORLD_KEY) ?? "").trim();
+    return saved || DEFAULT_CHARACTER_WORLD_ID;
+}
+
+/** 当前世界 id 归一化：世界已被删除 / id 无效时回落到默认世界 */
+export function resolveCurrentWorldId(groups?: CharacterWorldGroup[]): string {
+    const list = groups ?? loadCharacterWorldGroups();
+    const saved = getCurrentWorldId();
+    return list.some(group => group.id === saved) ? saved : DEFAULT_CHARACTER_WORLD_ID;
+}
+
+/**
+ * 切换当前世界：持久化 + 广播（角色画布与聊天 App 双向同步）。
+ * 传入不存在的世界 id 时回落到默认世界；值没变则不广播，避免监听方互相触发成环。
+ */
+export function setCurrentWorldId(worldId: string): void {
+    if (!isBrowser()) return;
+    const groups = loadCharacterWorldGroups();
+    const wanted = (worldId ?? "").trim();
+    const next = groups.some(group => group.id === wanted) ? wanted : DEFAULT_CHARACTER_WORLD_ID;
+    if (getCurrentWorldId() === next) return;
+    kvSet(CURRENT_WORLD_KEY, next);
+    window.dispatchEvent(new CustomEvent(CURRENT_WORLD_CHANGED_EVENT, { detail: { worldId: next } }));
+}
+
+/** 是否启用世界隔离：只有一个世界时聊天/通讯录不过滤，单世界用户不会平白多一层概念 */
+export function isWorldIsolationActive(groups?: CharacterWorldGroup[]): boolean {
+    return (groups ?? loadCharacterWorldGroups()).length > 1;
 }
 
 export function createCharacterWorldGroup(name: string): CharacterWorldGroup {

@@ -14,6 +14,7 @@ import { AlertCircle } from "lucide-react";
 import { kvGet, kvSet, registerKvMigration } from "@/lib/kv-db";
 import { onUserComment, MOMENT_PHOTO_GENERATION_FAILED_EVENT } from "@/lib/moments-engine";
 import { GeneratedImageErrorDialog } from "./generated-image-error-dialog";
+import { ChatWorldSwitcher, useChatWorld } from "./chat-world";
 
 const COVER_ASSET_KEY = "moments_cover_asset_id";
 registerKvMigration(COVER_ASSET_KEY);
@@ -104,9 +105,20 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
 
     useEffect(() => stopLoadMoreAnchorTracking, [stopLoadMoreAnchorTracking]);
 
+    // 世界隔离：朋友圈跟着「当前世界」走（与角色 App 世界卷宗共用同一份记忆）
+    const world = useChatWorld();
+    const worldRef = useRef(world);
+    worldRef.current = world;
+
     const refreshPosts = useCallback(() => {
         const contactIds = new Set(loadChatContacts().map(c => c.characterId));
-        setPosts(getAllPosts().filter(p => p.authorType === "user" || contactIds.has(p.authorId)));
+        const world = worldRef.current;
+        setPosts(getAllPosts().filter(p => {
+            if (p.authorType === "user") return true;
+            if (!contactIds.has(p.authorId)) return false;
+            // 世界隔离：朋友圈也只显示当前世界的角色动态
+            return world.isolationActive ? world.memberIds.has(p.authorId) : true;
+        }));
         setUnreadNotifs(getUnreadMomentsNotifications());
     }, []);
 
@@ -319,6 +331,12 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
         };
     }, [refreshPosts]);
 
+    // 切换世界后重算可见动态（当前世界的角色 + 用户自己）
+    useEffect(() => {
+        refreshPosts();
+        setVisiblePostCount(MOMENTS_INITIAL_POST_COUNT);
+    }, [world.currentWorldId, refreshPosts]);
+
     // Hide tab bar only when the full compose page is open.
     useEffect(() => {
         window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: showCompose }));
@@ -389,19 +407,23 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
             title="动态"
             onBack={onCloseApp}
             rightAction={
-                <button
-                    onClick={() => setShowCompose(true)}
-                    className="page-back-btn"
-                    title="发布朋友圈"
-                    type="button"
-                    aria-label="发布朋友圈"
-                >
-                    <svg width={22} height={22} viewBox="0 0 24 24" fill="none" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" stroke="currentColor">
-                        <rect x="2" y="6" width="20" height="14" rx="2" />
-                        <circle cx="12" cy="13" r="4" />
-                        <path d="M8 6l1-3h6l1 3" />
-                    </svg>
-                </button>
+                <div className="flex items-center gap-1">
+                    {/* 朋友圈也跟着当前世界走，这里给个入口显示/切换世界 */}
+                    <ChatWorldSwitcher state={world} />
+                    <button
+                        onClick={() => setShowCompose(true)}
+                        className="page-back-btn"
+                        title="发布朋友圈"
+                        type="button"
+                        aria-label="发布朋友圈"
+                    >
+                        <svg width={22} height={22} viewBox="0 0 24 24" fill="none" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" stroke="currentColor">
+                            <rect x="2" y="6" width="20" height="14" rx="2" />
+                            <circle cx="12" cy="13" r="4" />
+                            <path d="M8 6l1-3h6l1 3" />
+                        </svg>
+                    </button>
+                </div>
             }
             className={`moments-feed-page ${headerScrolled ? "is-scrolled" : ""} ${activeComposer ? "has-comment-modal" : ""}`}
             bodyRef={scrollRef}

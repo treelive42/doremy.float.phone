@@ -27,6 +27,7 @@ import {
     subscribeMascotSettings,
     updateMascotSettings,
 } from "@/lib/mascot-settings";
+import { ChatWorldSwitcher, useChatWorld } from "./chat-world";
 
 type ChatContactsListProps = {
     onCloseApp: () => void;
@@ -56,6 +57,10 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
     const addFromCardRef = useRef(false);
     const mascotSettings = useSyncExternalStore(subscribeMascotSettings, getMascotSettingsSnapshot, getMascotSettingsSnapshot);
     const [mascotAvatarUrl, setMascotAvatarUrl] = useState(mascotSettings.avatarImage || DEFAULT_MASCOT_AVATAR);
+
+    // 世界隔离：与角色 App 的世界卷宗共用同一个「当前世界」，
+    // 通讯录只展示当前世界的角色（未建立多个世界时不过滤）。
+    const world = useChatWorld();
 
     const identity = useMemo(() => resolveUserIdentity(), []);
     const chars = useMemo(() => loadCharacters(), []);
@@ -127,12 +132,28 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
         return () => window.removeEventListener("friend-requests-updated", handler);
     }, [refresh]);
 
+    /** 当前世界范围内的联系人（未启用世界隔离时就是全部联系人） */
+    const scopedContacts = useMemo(
+        () => (world.isolationActive
+            ? contacts.filter(c => c.char && world.memberIds.has(c.char.id))
+            : contacts),
+        [contacts, world.isolationActive, world.memberIds]
+    );
+
+    /** 好友申请同样按世界过滤：切到「2World」时不该看见「1World」角色发来的申请 */
+    const visiblePendingRequests = useMemo(
+        () => (world.isolationActive
+            ? pendingRequests.filter(req => world.memberIds.has(req.characterId))
+            : pendingRequests),
+        [pendingRequests, world.isolationActive, world.memberIds]
+    );
+
     /** Group contacts by pinyin initial */
     const { grouped, indexLetters } = useMemo(() => {
         const keyword = deferredContactFilter.trim().toLowerCase();
         const filtered = keyword
-            ? contacts.filter(c => (c.char?.name || "").toLowerCase().includes(keyword))
-            : contacts;
+            ? scopedContacts.filter(c => (c.char?.name || "").toLowerCase().includes(keyword))
+            : scopedContacts;
         const map: Record<string, typeof contacts> = {};
         for (const c of filtered) {
             const letter = getInitial(c.char?.name || "");
@@ -146,7 +167,7 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
         });
         return { grouped: map, indexLetters: sorted };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [contacts, deferredContactFilter]);
+    }, [scopedContacts, deferredContactFilter]);
 
     const handleAccept = async (req: FriendRequest) => {
         setIsProcessing(true);
@@ -209,6 +230,7 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
                 <div className="pt-5 pb-1">
                     <div className="flex items-center justify-between mb-4 mt-2">
                         <span className="ts-28 font-bold text-[var(--c-text-title)]">Contacts</span>
+                        <ChatWorldSwitcher state={world} />
                     </div>
                     <div className="chat-search-bar">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--c-icon)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
@@ -225,7 +247,7 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
                 <div className="mb-3 mt-3">
                     <div
                         className="minimal-list-item"
-                        onClick={() => pendingRequests.length > 0 && setShowRequestList(true)}
+                        onClick={() => visiblePendingRequests.length > 0 && setShowRequestList(true)}
                     >
                         <div className="w-[48px] h-[48px] rounded-full bg-[var(--c-action-blue,#246bfd)] flex items-center justify-center shrink-0">
                             <svg width={24} height={24} viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
@@ -238,8 +260,8 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
                         <div className="flex-1 overflow-hidden h-[48px] flex flex-col justify-center">
                             <div className="ts-16 font-medium text-[var(--c-text-title)]">New Friends</div>
                         </div>
-                        {pendingRequests.length > 0 && (
-                            <div className="minimal-unread-count ml-auto shrink-0">{pendingRequests.length}</div>
+                        {visiblePendingRequests.length > 0 && (
+                            <div className="minimal-unread-count ml-auto shrink-0">{visiblePendingRequests.length}</div>
                         )}
                     </div>
                 </div>
@@ -260,9 +282,13 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
                 )}
 
                 {/* Contacts list grouped by pinyin initial */}
-                {contacts.length === 0 ? (
+                {scopedContacts.length === 0 ? (
                     <div className="ui-empty">
-                        <span className="menu-desc">暂无联系人，去消息页右上角添加吧</span>
+                        <span className="menu-desc">
+                            {contacts.length === 0
+                                ? "暂无联系人，去消息页右上角添加吧"
+                                : `「${world.currentGroup?.name || "默认世界"}」下暂无联系人，切换世界看看`}
+                        </span>
                     </div>
                 ) : (
                     <div className="flex flex-col gap-1">
@@ -328,13 +354,13 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
                         <div className="ts-17 font-semibold text-center text-[var(--c-text-title)]">
                             新的朋友
                         </div>
-                        {pendingRequests.length === 0 ? (
+                        {visiblePendingRequests.length === 0 ? (
                             <div className="py-6 text-center text-[var(--c-text)] ts-14">
                                 暂无好友申请
                             </div>
                         ) : (
                             <div className="freq-list">
-                                {pendingRequests.map(req => {
+                                {visiblePendingRequests.map(req => {
                                     const char = getCharForRequest(req);
                                     return (
                                         <div
@@ -512,6 +538,11 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
                                         <div className="ts-18 font-bold text-[var(--c-text-title)] mb-1">{addResult.name || "UNNAMED"}</div>
                                         <div className="menu-desc">微信号: {addResult.wechatID || "N/A"}</div>
                                         <div className="menu-desc">个性签名: {addResult.persona ? addResult.persona.slice(0, 30) + (addResult.persona.length > 30 ? "..." : "") : "暂无"}</div>
+                                        {world.isolationActive && !world.isInCurrentWorld(addResult.id) && (
+                                            <div className="menu-desc" style={{ color: "var(--c-action-blue, #246bfd)" }}>
+                                                属于「{world.worldNameOf(addResult.id) || "默认世界"}」，加好友后要切到那个世界才会出现在通讯录
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             </div>

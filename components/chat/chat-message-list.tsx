@@ -36,6 +36,7 @@ import {
     subscribeMascotSettings,
     updateMascotSettings,
 } from "@/lib/mascot-settings";
+import { ChatWorldSwitcher, useChatWorld } from "./chat-world";
 
 function parseTime(value?: string | null): number {
     if (!value) return 0;
@@ -120,6 +121,10 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
     const mascotSettings = useSyncExternalStore(subscribeMascotSettings, getMascotSettingsSnapshot, getMascotSettingsSnapshot);
     const mascotChat = useSyncExternalStore(subscribeMascotChat, getMascotChatSnapshot, getMascotChatSnapshot);
     const [mascotAvatarUrl, setMascotAvatarUrl] = useState(mascotSettings.avatarImage || DEFAULT_MASCOT_AVATAR);
+
+    // 世界隔离：与角色 App 的世界卷宗共用同一个「当前世界」，
+    // 私聊会话只显示当前世界角色的；群聊按成员是否落在当前世界判断。
+    const world = useChatWorld();
 
     useEffect(() => {
         setIdentity(resolveUserIdentity());
@@ -261,6 +266,7 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                 <div className="px-5 pt-5 pb-3">
                     <div className="flex items-center justify-between mb-4 mt-2">
                         <span className="ts-28 font-bold text-[var(--c-text-title)]">Chats</span>
+                        <ChatWorldSwitcher state={world} />
                     </div>
                     <div className="chat-search-bar">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--c-icon)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
@@ -295,6 +301,14 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                             const regularItems = [...sessions]
                             .filter(s => {
                                 if (!(s.isGroup || contactIds.has(s.contactId))) return false;
+                                // 世界隔离：私聊看角色归属，群聊看有没有当前世界的成员
+                                if (world.isolationActive) {
+                                    if (s.isGroup) {
+                                        if (!(s.participantIds ?? []).some(id => world.memberIds.has(id))) return false;
+                                    } else if (!world.memberIds.has(s.contactId)) {
+                                        return false;
+                                    }
+                                }
                                 if (!hasSessionListContent(s.id)) return false;
                                 if (listTab === "private" && s.isGroup) return false;
                                 if (listTab === "group" && !s.isGroup) return false;
@@ -318,7 +332,9 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                             if (!showMascot && regularItems.length === 0) {
                                 return (
                                     <div className="px-5 py-10 text-center text-[var(--c-icon)] ts-14">
-                                        暂无聊天记录，点击右上角「+」发起聊天
+                                        {world.isolationActive
+                                            ? `「${world.currentGroup?.name || "默认世界"}」下暂无聊天，切换世界或点击右上角「+」发起聊天`
+                                            : "暂无聊天记录，点击右上角「+」发起聊天"}
                                     </div>
                                 );
                             }
@@ -390,7 +406,10 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                             {/* 备选：已有角色卡但还不在联系人里，点击直接填入号码 */}
                             {(() => {
                                 const contactIds = new Set(loadChatContacts().map(c => c.characterId));
-                                const candidates = loadCharacters().filter(c => !contactIds.has(c.id));
+                                const candidates = loadCharacters()
+                                    .filter(c => !contactIds.has(c.id))
+                                    // 世界隔离：候选也只列当前世界的角色
+                                    .filter(c => world.isInCurrentWorld(c.id));
                                 if (candidates.length === 0 && mascotSettings.chatEnabled) return null;
                                 return (
                                     <div className="menu-group" style={{ marginTop: 12 }}>
@@ -468,6 +487,11 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                                         <div className="ts-18 font-bold text-[var(--c-text-title)] mb-1">{searchResult.name || "UNNAMED"}</div>
                                         <div className="menu-desc">微信号: {searchResult.wechatID || "N/A"}</div>
                                         <div className="menu-desc">个性签名: {searchResult.persona ? searchResult.persona.slice(0, 30) + (searchResult.persona.length > 30 ? "..." : "") : "暂无"}</div>
+                                        {!world.isInCurrentWorld(searchResult.id) && (
+                                            <div className="menu-desc" style={{ color: "var(--c-action-blue, #246bfd)" }}>
+                                                属于「{world.worldNameOf(searchResult.id) || "默认世界"}」，加好友后需切到那个世界才能看到
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             </div>
@@ -574,6 +598,8 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
             {/* Contact Picker */}
             {showContactPicker && (
                 <ContactPicker
+                    // 只列当前世界的联系人：世界隔离下发起聊天也不该跨世界
+                    allowedIds={world.isolationActive ? world.memberIds : null}
                     onClose={() => setShowContactPicker(false)}
                     onSelect={(charId) => {
                         const session = createOrGetSession(charId);
@@ -637,6 +663,8 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
             {/* Group Create Modal */}
             {showGroupCreate && (
                 <GroupCreateModal
+                    // 世界隔离：建群只列当前世界的成员，避免跨世界串人
+                    allowedIds={world.isolationActive ? [...world.memberIds] : null}
                     onClose={() => setShowGroupCreate(false)}
                     onCreate={(groupName, participantIds, isSpectator) => {
                         const newSession = createGroupSession(groupName, participantIds, { isSpectator });
@@ -715,20 +743,28 @@ function MascotSessionItem({
     );
 }
 
-function ContactPicker({ onClose, onSelect }: { onClose: () => void; onSelect: (charId: string) => void }) {
+function ContactPicker({ onClose, onSelect, allowedIds }: {
+    onClose: () => void;
+    onSelect: (charId: string) => void;
+    /** 世界隔离时只允许当前世界的角色；null / 不传 = 不限 */
+    allowedIds?: Set<string> | null;
+}) {
     const contacts = loadChatContacts();
     const chars = loadCharacters();
 
     const enrichedContacts = contacts
         .map(c => ({ ...c, char: chars.find(ch => ch.id === c.characterId) }))
-        .filter(c => c.char) as (typeof contacts[number] & { char: Character })[];
+        .filter(c => c.char)
+        .filter(c => !allowedIds || allowedIds.has(c.characterId)) as (typeof contacts[number] & { char: Character })[];
 
     return (
         <div className="modal-overlay" onClick={onClose}>
             <div className="modal-dialog" onClick={e => e.stopPropagation()}>
                 <span className="modal-header-title">选择联系人</span>
                 {enrichedContacts.length === 0 ? (
-                    <span className="menu-desc">暂无联系人，请先添加好友</span>
+                    <span className="menu-desc">
+                        {allowedIds ? "当前世界还没有可聊的联系人，切换世界或先添加好友" : "暂无联系人，请先添加好友"}
+                    </span>
                 ) : (
                     <div className="chat-contact-list">
                         {enrichedContacts.map(c => (

@@ -11,9 +11,11 @@ import { ChatFallbackAvatar } from "./chat-fallback-avatar";
 type GroupCreateModalProps = {
     onClose: () => void;
     onCreate: (groupName: string, participantIds: string[], isSpectator: boolean) => void;
+    /** 世界隔离时只允许挑选当前世界的角色；null / 不传 = 不限 */
+    allowedIds?: string[] | null;
 };
 
-export function GroupCreateModal({ onClose, onCreate }: GroupCreateModalProps) {
+export function GroupCreateModal({ onClose, onCreate, allowedIds }: GroupCreateModalProps) {
     const [step, setStep] = useState<"pick" | "name">("pick");
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const [groupName, setGroupName] = useState("");
@@ -22,9 +24,11 @@ export function GroupCreateModal({ onClose, onCreate }: GroupCreateModalProps) {
     const contacts = loadChatContacts();
     const chars = loadCharacters();
 
+    const allowedSet = allowedIds ? new Set(allowedIds) : null;
     const enriched = contacts
         .map(c => ({ ...c, char: chars.find(ch => ch.id === c.characterId) }))
-        .filter(c => c.char) as (typeof contacts[number] & { char: Character })[];
+        .filter(c => c.char)
+        .filter(c => !allowedSet || allowedSet.has(c.characterId)) as (typeof contacts[number] & { char: Character })[];
 
     const toggle = (id: string) => {
         setSelectedIds(prev => {
@@ -50,7 +54,9 @@ export function GroupCreateModal({ onClose, onCreate }: GroupCreateModalProps) {
                     <>
                         <span className="modal-header-title">选择群成员</span>
                         {enriched.length === 0 ? (
-                            <span className="menu-desc">暂无联系人，请先添加好友</span>
+                            <span className="menu-desc">
+                                {allowedSet ? "当前世界还没有可邀请的联系人，切换世界或先添加好友" : "暂无联系人，请先添加好友"}
+                            </span>
                         ) : (
                             <div className="chat-contact-list">
                                 {enriched.map(c => {
