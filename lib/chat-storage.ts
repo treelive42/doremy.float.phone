@@ -256,6 +256,12 @@ export type ChatMessage = {
         fileName?: string;
         fileDuration?: number;
         useReferenceImage?: boolean; // AI photo tag: whether to send the character reference image to the generator
+        /** 合照多人锁脸：一起锁脸的角色 id（第一个当作主参考） */
+        referenceCharacterIds?: string[];
+        /** 合照里包含「我」：把用户锁脸参考图一并提交 */
+        useUserReferenceImage?: boolean;
+        /** 实际提交的参考图数量（≥2 表示多人锁脸生效） */
+        imageGenerationReferenceCount?: number;
         imageGenerationMediaRef?: string;
         imageGenerationPrompt?: string;
         imageGenerationUsedReference?: boolean;

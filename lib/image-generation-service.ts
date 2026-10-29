@@ -829,10 +829,10 @@ export async function generateImageFromConfiguredApi(params: {
 
   const rawDescription = params.description.trim();
   if (!rawDescription) return null;
-  // 画的是「我」：参考图/人物特征换用用户锁脸设置
-  const referenceSubjectId = params.useUserReference
-    ? USER_FACE_REFERENCE_ID
-    : params.characterId;
+  // 主参考（决定 edits 主体）：有角色时角色优先，「我」作为附加参考一起提交，
+  // 这样合照里主角色的脸不会被用户参考图顶掉。
+  const referenceSubjectId = params.characterId
+    || (params.useUserReference ? USER_FACE_REFERENCE_ID : undefined);
   // 外观提示词统一在下面的「锁定谁的脸」环节按 subject 追加，这里只用原始描述，
   // 避免用户特征被拼两次。
   const description = rawDescription;

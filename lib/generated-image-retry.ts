@@ -40,8 +40,19 @@ export function isPendingChatGeneratedImageMessage(message: Pick<ChatMessage, "m
 export async function generateAndApplyChatGeneratedImage(
     message: ChatMessage,
     characterId?: string,
-    options?: { signal?: AbortSignal; description?: string; useReferenceImage?: boolean },
+    options?: {
+        signal?: AbortSignal;
+        description?: string;
+        useReferenceImage?: boolean;
+        /** 合照多人锁脸：额外一起锁脸的角色 id（第一个当作主参考） */
+        extraReferenceIds?: string[];
+        /** 画里包含「我」：把用户锁脸参考图一并提交 */
+        useUserReference?: boolean;
+    },
 ): Promise<ChatMessage> {
+    // 合照选择记在消息里：重试/重新生成时不必再选一次
+    const extraReferenceIds = options?.extraReferenceIds ?? message.mediaData?.referenceCharacterIds ?? [];
+    const useUserReference = options?.useUserReference ?? message.mediaData?.useUserReferenceImage === true;
     const previousDescription = message.mediaData?.label?.trim() || "";
     const description = (options?.description ?? previousDescription).trim();
     if (!description) throw new Error("缺少图片描述，无法重新生成");
@@ -78,6 +89,8 @@ export async function generateAndApplyChatGeneratedImage(
             characterId,
             appId: "chat",
             useReferenceImage: effectiveUseReference,
+            extraReferenceIds,
+            useUserReference,
             signal: options?.signal,
         });
         if (!generated) throw new Error("生图配置未启用或不完整");
@@ -93,8 +106,12 @@ export async function generateAndApplyChatGeneratedImage(
             imageGenerationMediaRef: generated.mediaRef,
             imageGenerationPrompt: generated.prompt,
             imageGenerationUsedReference: generated.usedReferenceImage,
+            imageGenerationReferenceCount: generated.usedReferenceCount,
             imageGenerationStatus: "generated",
             imageGenerationError: undefined,
+            // 记住这次的合照阵容，重新生成时沿用
+            referenceCharacterIds: extraReferenceIds,
+            useUserReferenceImage: useUserReference,
         };
         const updated = updateChatMessage(message.id, {
             content: fileName,

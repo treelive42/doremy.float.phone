@@ -11,6 +11,7 @@ import { translateReasoningText } from "@/lib/reasoning-translate";
 import { MessageBubble, MediaDetailModal, prewarmStickerCache, BilingualTextBlock, isStandaloneHtmlPreviewContent, normalizeTextBubbleContent } from "./message-bubble";
 import { GeneratedImageErrorDialog } from "./generated-image-error-dialog";
 import { PhotoInputModal, TextPhotoModal, VoiceRecordModal, RedPacketModal, LocationInputModal, SystemInstructionModal } from "./rich-input-modals";
+import { GroupPhotoPickerModal } from "./group-photo-picker";
 import { EmojiPanel, StickerPanel } from "./emoji-panel";
 import { StickerSearchSuggest } from "./sticker-search-suggest";
 import { StateValuesPanel } from "./state-values-panel";
@@ -540,7 +541,7 @@ type PendingMessageJump = {
 };
 
 const TRANSIENT_MESSAGE_PREFIX = "ui-transient-";
-type RichModalKind = "photo" | "text_photo" | "red_packet" | "transfer" | "location" | "transfer_target" | "voice_msg" | "gift" | "system_instruction";
+type RichModalKind = "photo" | "text_photo" | "red_packet" | "transfer" | "location" | "transfer_target" | "voice_msg" | "gift" | "system_instruction" | "group_photo";
 type ChatTextInputHandle = {
     appendText: (text: string, options?: { focus?: boolean }) => void;
     clear: () => void;
@@ -774,6 +775,7 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
     const plusMenuItems = [
         { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>, label: "照片墙", onClick: () => onOpenRichModal("photo") },
         { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><line x1="7" y1="8" x2="17" y2="8" /><line x1="7" y1="12" x2="14" y2="12" /><line x1="7" y1="16" x2="11" y2="16" /></svg>, label: "文字图片", onClick: () => onOpenRichModal("text_photo") },
+        { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="9" cy="8" r="3" /><circle cx="17" cy="9" r="2.4" /><path d="M3 20c0-3 2.7-5 6-5s6 2 6 5" /><path d="M15.5 20c0-2.2 1.6-3.6 3.6-3.6 1.3 0 2.4.5 2.9 1.5" /></svg>, label: "合照锁脸", onClick: () => onOpenRichModal("group_photo") },
         { icon: <AlertCircle size={22} strokeWidth={1.5} color="var(--c-text)" />, label: "系统指令", onClick: () => onOpenRichModal("system_instruction") },
         { icon: <Clapperboard size={22} strokeWidth={1.5} color={theaterMode ? "var(--c-icon-active)" : "var(--c-text)"} />, label: "番外指令模式", active: theaterMode, onClick: onToggleTheaterMode },
         { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M23 7l-7 5 7 5V7z" /><rect x="1" y="5" width="15" height="14" rx="2" ry="2" /></svg>, label: "视频通话", onClick: onStartVideoCall },
@@ -6891,6 +6893,53 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 <PhotoInputModal
                     onSend={(desc, imageDataUrl) => { setRichModal(null); sendRichMessage("image", { label: desc }, "", imageDataUrl); }}
                     onClose={() => setRichModal(null)}
+                />
+            )}
+            {/* 合照锁脸：选 2~3 个人一起入镜，多参考图同时锁定各自的脸 */}
+            {richModal === "group_photo" && (
+                <GroupPhotoPickerModal
+                    currentCharacterId={session.isGroup ? undefined : session.contactId}
+                    onClose={() => setRichModal(null)}
+                    onSend={({ description, characterIds, includeUser }) => {
+                        setRichModal(null);
+                        const [firstId, ...restIds] = characterIds;
+                        // 没选角色（只选了「我」）时，私聊默认用本会话角色当主参考
+                        const primary = firstId ?? (session.isGroup ? undefined : session.contactId);
+                        const extras = firstId ? restIds : [];
+                        const pending = pushChatMessage({
+                            sessionId: session.id,
+                            role: "user",
+                            content: description,
+                            mediaType: "media_file",
+                            mediaData: {
+                                ...createPendingChatGeneratedImageData({ label: description, fileType: "image" }, description),
+                                useReferenceImage: true,
+                                referenceCharacterIds: characterIds,
+                                useUserReferenceImage: includeUser,
+                            },
+                        });
+                        setMessages(prev => [...prev, pending]);
+                        void (async () => {
+                            try {
+                                const updated = await generateAndApplyChatGeneratedImage(pending, primary, {
+                                    description,
+                                    extraReferenceIds: extras,
+                                    useUserReference: includeUser,
+                                });
+                                setMessages(prev => prev.map(m => (m.id === updated.id ? updated : m)));
+                                const refCount = updated.mediaData?.imageGenerationReferenceCount ?? 0;
+                                showChatToast(refCount >= 2
+                                    ? `合照已生成（锁住了 ${refCount} 张脸）`
+                                    : "合照已生成（接口只接受 1 张参考图，已退回单人锁脸）");
+                            } catch (error) {
+                                const message = error instanceof Error ? error.message : String(error);
+                                setMessages(prev => prev.map(m => (m.id === pending.id
+                                    ? { ...m, mediaData: { ...m.mediaData, imageGenerationStatus: "failed", imageGenerationError: message } }
+                                    : m)));
+                                showChatToast("合照生成失败：" + message);
+                            }
+                        })();
+                    }}
                 />
             )}
             {richModal === "gift" && (
