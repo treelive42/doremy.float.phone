@@ -12,8 +12,13 @@ import {
 import { loadCharacters } from "@/lib/character-storage";
 import type { Character } from "@/lib/character-types";
 import { getChatImageFromIndexedDB, saveChatImageToIndexedDB } from "@/lib/chat-asset-storage";
-import { USER_FACE_REFERENCE_ID } from "@/lib/user-face-reference";
-import { resolveUserIdentity } from "@/lib/settings-storage";
+import {
+    USER_FACE_REFERENCE_ID,
+    getUserFaceReferenceByKey,
+    isUserFaceReferenceId,
+    userFaceReferenceIdForIdentity,
+} from "@/lib/user-face-reference";
+import { loadUserIdentities, resolveUserIdentity } from "@/lib/settings-storage";
 import {
     fetchImageGenerationModels,
     fetchNovelAiModels,
@@ -363,7 +368,10 @@ export function ImageGenerationSettings() {
 
     const uploadReference = async (characterId: string, file: File) => {
         const assetId = await saveChatImageToIndexedDB(file);
-        const current = settings.characterReferences?.[characterId];
+        // 「我」的身份行没单独配图时，从兜底的默认脸继承特征提示词与选区
+        const current = isUserFaceReferenceId(characterId)
+            ? getUserFaceReferenceByKey(settings, characterId)
+            : settings.characterReferences?.[characterId];
         const faceCrop = current?.faceCrop || { x: 0.27, y: 0.12, size: 0.46 };
         persist({
             ...settings,
@@ -386,7 +394,10 @@ export function ImageGenerationSettings() {
         characterId: string,
         patch: Partial<ImageGenerationSettingsType["characterReferences"][string]>,
     ) => {
-        const current = settings.characterReferences?.[characterId];
+        // 身份行若还没自己的条目，先继承默认脸（否则只改提示词会把参考图弄丢）
+        const current = isUserFaceReferenceId(characterId)
+            ? getUserFaceReferenceByKey(settings, characterId)
+            : settings.characterReferences?.[characterId];
         persist({
             ...settings,
             characterReferences: {
@@ -401,7 +412,10 @@ export function ImageGenerationSettings() {
     };
 
     const openFaceCrop = (characterId: string) => {
-        const crop = settings.characterReferences?.[characterId]?.faceCrop || { x: 0.27, y: 0.12, size: 0.46 };
+        const entry = isUserFaceReferenceId(characterId)
+            ? getUserFaceReferenceByKey(settings, characterId)
+            : settings.characterReferences?.[characterId];
+        const crop = entry?.faceCrop || { x: 0.27, y: 0.12, size: 0.46 };
         setCropDraft(crop);
         setCropViewport({ width: 0, height: 0 });
         setCropCharacterId(characterId);
@@ -473,23 +487,42 @@ export function ImageGenerationSettings() {
     const selectedCharacter = characters.find(character => character.id === selectedCharacterId) || null;
     const selectedReference = selectedCharacter ? settings.characterReferences?.[selectedCharacter.id] : undefined;
     // ── 「我」（用户）的锁脸参考图：与角色同源，只是用保留 id 作键 ──
-    const userIdentity = (() => {
-        try { return resolveUserIdentity(); } catch { return null; }
+    // 多身份时每个身份各一行（键 __user_self__::<identityId>），另外保留一行「默认脸」
+    // 给没单独配过图的身份兜底；只有一个身份时完全沿用老的单行「我」。
+    const userIdentities = (() => {
+        try { return loadUserIdentities(); } catch { return []; }
     })();
-    const userSelfEntry = {
+    const defaultUserSelfEntry = {
         id: USER_FACE_REFERENCE_ID,
-        name: userIdentity?.name?.trim() || "我（用户）",
-        avatar: userIdentity?.avatarUrl || null,
+        name: userIdentities[0]?.name?.trim() || resolveUserIdentity()?.name?.trim() || "我（用户）",
+        avatar: userIdentities[0]?.avatarUrl || null,
     };
+    const userSelfEntries = userIdentities.length > 1
+        ? [
+            ...userIdentities.map(identity => ({
+                id: userFaceReferenceIdForIdentity(identity.id),
+                name: identity.name?.trim() || "未命名身份",
+                avatar: identity.avatarUrl || null,
+            })),
+            { ...defaultUserSelfEntry, name: "默认脸（各身份共用）" },
+        ]
+        : [defaultUserSelfEntry];
     const identityRows = [
-        userSelfEntry,
+        ...userSelfEntries,
         ...characters.map(character => ({ id: character.id, name: character.name, avatar: character.avatar })),
     ];
-    const isUserSelfSelected = selectedCharacterId === USER_FACE_REFERENCE_ID;
+    const isUserSelfSelected = isUserFaceReferenceId(selectedCharacterId);
     const selectedEntry = selectedCharacter
         ? { id: selectedCharacter.id, name: selectedCharacter.name, avatar: selectedCharacter.avatar }
-        : (isUserSelfSelected ? userSelfEntry : null);
-    const selectedEntryReference = selectedEntry ? settings.characterReferences?.[selectedEntry.id] : undefined;
+        : (identityRows.find(entry => entry.id === selectedCharacterId) ?? null);
+    const selectedEntryReference = selectedEntry
+        ? (isUserFaceReferenceId(selectedEntry.id)
+            ? getUserFaceReferenceByKey(settings, selectedEntry.id)
+            : settings.characterReferences?.[selectedEntry.id])
+        : undefined;
+    // 参考图预览：某个身份没单独传图时显示兜底的「默认脸」，否则选取脸部/预览都会是空白
+    const previewFor = (key: string) => referencePreviews[key]
+        || (isUserFaceReferenceId(key) ? referencePreviews[USER_FACE_REFERENCE_ID] : undefined);
     const characterListOverflows = characterScrollMetrics.scrollHeight > characterScrollMetrics.clientHeight + 1;
     const characterScrollThumbPercent = characterListOverflows
         ? Math.max(14, characterScrollMetrics.clientHeight / characterScrollMetrics.scrollHeight * 100)
@@ -1040,6 +1073,11 @@ export function ImageGenerationSettings() {
                         <span className="leading-[1.5]">NovelAI 会使用角色专属特征提示词，但暂不读取参考图；切回 OpenAI 兼容引擎后参考图仍会保留。</span>
                     </Alert>
                 )}
+                {userIdentities.length > 1 && (
+                    <span className="menu-desc ml-1">
+                        你有 {userIdentities.length} 个身份：每个身份可以用各自的脸。没单独传图的身份自动沿用下面那张「默认脸」。
+                    </span>
+                )}
                 <div className="relative">
                     <div
                         ref={characterListRef}
@@ -1047,9 +1085,14 @@ export function ImageGenerationSettings() {
                         onScroll={syncCharacterScrollMetrics}
                     >
                         {identityRows.map(entry => {
-                            const preview = referencePreviews[entry.id];
-                            const ref = settings.characterReferences?.[entry.id];
-                            const isSelf = entry.id === USER_FACE_REFERENCE_ID;
+                            const isSelf = isUserFaceReferenceId(entry.id);
+                            const ref = isSelf
+                                ? getUserFaceReferenceByKey(settings, entry.id)
+                                : settings.characterReferences?.[entry.id];
+                            // 这个身份没单独传图时，缩略图沿用兜底的「默认脸」
+                            const preview = previewFor(entry.id);
+                            // 名字后面标一下是否在用兜底脸，避免误以为已经单独配好了
+                            const usesFallbackFace = Boolean(preview) && !referencePreviews[entry.id];
                             return (
                                 <button
                                     key={entry.id}
@@ -1075,6 +1118,7 @@ export function ImageGenerationSettings() {
                                         </span>
                                         <span className="menu-desc truncate">
                                             {preview ? (ref?.enabled === false ? "参考图已关闭" : "参考图已启用") : "未上传参考图"}
+                                            {usesFallbackFace ? " · 沿用默认脸" : ""}
                                             {ref?.featurePrompt?.trim() ? " · 已设人物特征" : ""}
                                         </span>
                                     </span>
@@ -1115,7 +1159,7 @@ export function ImageGenerationSettings() {
                                         : "只影响这个角色，不会改动角色卡正文。"}
                                 </div>
                             </div>
-                            {referencePreviews[selectedEntry.id] && (
+                            {previewFor(selectedEntry.id) && (
                                 <button
                                     type="button"
                                     className={`ui-btn shrink-0 ${selectedEntryReference?.enabled === false ? "ui-btn-primary" : "ui-btn-outline"}`}
@@ -1175,9 +1219,9 @@ export function ImageGenerationSettings() {
                                     }}
                                 >
                                     <Upload size={16} />
-                                    {referencePreviews[selectedEntry.id] ? "更换参考图" : "选择参考图"}
+                                    {previewFor(selectedEntry.id) ? "更换参考图" : "选择参考图"}
                                 </button>
-                                {referencePreviews[selectedEntry.id] && (
+                                {previewFor(selectedEntry.id) && (
                                     <button type="button" className="ui-btn ui-btn-outline flex-1" onClick={() => openFaceCrop(selectedEntry.id)}>
                                         <ScanFace size={16} />
                                         选取脸部
@@ -1197,7 +1241,7 @@ export function ImageGenerationSettings() {
                                 <span className="menu-right settings-tools-menu-toggle">
                                     <Toggle
                                         checked={selectedEntryReference?.autoInGroupPhoto !== false}
-                                        onChange={(autoInGroupPhoto) => updateCharacterReference(USER_FACE_REFERENCE_ID, { autoInGroupPhoto })}
+                                        onChange={(autoInGroupPhoto) => updateCharacterReference(selectedEntry.id, { autoInGroupPhoto })}
                                         className="settings-toggle-control"
                                     />
                                 </span>
@@ -1207,7 +1251,7 @@ export function ImageGenerationSettings() {
                 )}
             </div>
 
-            {cropCharacterId && referencePreviews[cropCharacterId] && (
+            {cropCharacterId && previewFor(cropCharacterId) && (
                 <ContentDialog
                     title="选取脸部锁定区域"
                     confirmLabel="保存选区"
@@ -1222,7 +1266,7 @@ export function ImageGenerationSettings() {
                         <p className="menu-desc">拖动方框覆盖角色脸部；发送参考图时只会截取这个区域，减少服装和背景干扰。</p>
                         <div ref={cropContainerRef} className="relative mx-auto w-fit max-h-[52vh] max-w-full overflow-hidden rounded-xl bg-black/80">
                             <img
-                                src={referencePreviews[cropCharacterId]}
+                                src={previewFor(cropCharacterId)}
                                 alt="参考图脸部选取"
                                 draggable={false}
                                 className="block max-h-[52vh] max-w-full select-none object-contain"

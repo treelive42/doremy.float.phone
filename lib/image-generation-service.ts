@@ -2,7 +2,12 @@ import type { ImageGenerationSettings, NovelAiPreset } from "./settings-types";
 import { loadBindingConfig, loadImageGenerationSettings, resolveBinding, DEFAULT_NOVELAI_PRESET } from "./settings-storage";
 import { applyImageGenerationBinding } from "./image-generation-binding";
 import JSZip from "jszip";
-import { USER_FACE_REFERENCE_ID } from "./user-face-reference";
+import {
+  USER_FACE_REFERENCE_ID,
+  getUserFaceReferenceByKey,
+  isUserFaceReferenceId,
+  resolveUserFaceReferenceId,
+} from "./user-face-reference";
 import { getChatImageFromIndexedDB } from "./chat-asset-storage";
 import { storeMediaBlob } from "./media-cache-storage";
 import { throwIfAborted } from "./abort-utils";
@@ -829,10 +834,21 @@ export async function generateImageFromConfiguredApi(params: {
 
   const rawDescription = params.description.trim();
   if (!rawDescription) return null;
+  // 这个世界的「我」用哪张脸：身份 → 参考图键（每个身份一张，该身份没配就回落到全局默认）。
+  const profileReferenceId = resolveUserFaceReferenceId(params.characterId);
+  // 上层仍按老的全局键（如合照选择器勾「我」）传进来时，映射到当前身份那张脸；
+  // 显式传了具体身份键（__user_self__::xxx）则尊重原意。
+  const normalizeSubjectId = (id: string): string =>
+    id === USER_FACE_REFERENCE_ID ? profileReferenceId : id;
+  // 「我」的条目走身份回落链，角色条目照旧直接取
+  const referenceEntryOf = (subjectId: string) =>
+    isUserFaceReferenceId(subjectId)
+      ? getUserFaceReferenceByKey(settings, subjectId)
+      : settings.characterReferences?.[subjectId];
   // 主参考（决定 edits 主体）：有角色时角色优先，「我」作为附加参考一起提交，
   // 这样合照里主角色的脸不会被用户参考图顶掉。
   const referenceSubjectId = params.characterId
-    || (params.useUserReference ? USER_FACE_REFERENCE_ID : undefined);
+    || (params.useUserReference ? profileReferenceId : undefined);
   // 外观提示词统一在下面的「锁定谁的脸」环节按 subject 追加，这里只用原始描述，
   // 避免用户特征被拼两次。
   const description = rawDescription;
@@ -854,13 +870,14 @@ export async function generateImageFromConfiguredApi(params: {
     const naiSubjectIds: string[] = [];
     if (referenceSubjectId) naiSubjectIds.push(referenceSubjectId);
     for (const extraId of params.extraReferenceIds ?? []) {
-      if (extraId && !naiSubjectIds.includes(extraId)) naiSubjectIds.push(extraId);
+      const normalizedExtra = extraId ? normalizeSubjectId(extraId) : "";
+      if (normalizedExtra && !naiSubjectIds.includes(normalizedExtra)) naiSubjectIds.push(normalizedExtra);
     }
-    if (params.useUserReference && !naiSubjectIds.includes(USER_FACE_REFERENCE_ID)) {
-      naiSubjectIds.push(USER_FACE_REFERENCE_ID);
+    if (params.useUserReference && !naiSubjectIds.includes(profileReferenceId)) {
+      naiSubjectIds.push(profileReferenceId);
     }
     for (const subjectId of naiSubjectIds) {
-      const subjectRef = settings.characterReferences?.[subjectId];
+      const subjectRef = referenceEntryOf(subjectId);
       if (!subjectRef || subjectRef.enabled === false) continue;
       if (subjectRef.novelAiFeaturePromptEnabled === false) continue;
       const feature = subjectRef.featurePrompt?.trim();
@@ -903,11 +920,12 @@ export async function generateImageFromConfiguredApi(params: {
   const primaryId = referenceSubjectId;
   if (primaryId) subjectIds.push(primaryId);
   for (const extraId of params.extraReferenceIds ?? []) {
-    if (extraId && !subjectIds.includes(extraId)) subjectIds.push(extraId);
+    const normalizedExtra = extraId ? normalizeSubjectId(extraId) : "";
+    if (normalizedExtra && !subjectIds.includes(normalizedExtra)) subjectIds.push(normalizedExtra);
   }
   // 角色出镜 + 描述里明显带「我」（合照/我们一起…）时，自动把用户的脸也一起锁上。
   // 只有在用户确实配了参考图或外观提示词时才自动介入，避免影响纯角色出图。
-  const userRef = settings.characterReferences?.[USER_FACE_REFERENCE_ID];
+  const userRef = referenceEntryOf(profileReferenceId);
   const userRefUsable = Boolean(userRef && userRef.enabled !== false && (userRef.assetId || userRef.featurePrompt?.trim()));
   const wantsUserInFrame = userRefUsable && (
     params.useUserReference
@@ -915,12 +933,12 @@ export async function generateImageFromConfiguredApi(params: {
     || (
       userRef?.autoInGroupPhoto !== false
       && Boolean(primaryId)
-      && primaryId !== USER_FACE_REFERENCE_ID
+      && !isUserFaceReferenceId(primaryId)
       && mentionsUserInFrame(rawDescription)
     )
   );
-  if (wantsUserInFrame && !subjectIds.includes(USER_FACE_REFERENCE_ID)) {
-    subjectIds.push(USER_FACE_REFERENCE_ID);
+  if (wantsUserInFrame && !subjectIds.includes(profileReferenceId)) {
+    subjectIds.push(profileReferenceId);
   }
 
   // 「非自拍不使用参考图」开关已从生图设置页删除：参考图启用后始终参与生成。
@@ -935,9 +953,9 @@ export async function generateImageFromConfiguredApi(params: {
   const referenceImages: string[] = [];
   const appearanceLines: string[] = [];
   for (const subjectId of subjectIds) {
-    const subjectRef = settings.characterReferences?.[subjectId];
+    const subjectRef = referenceEntryOf(subjectId);
     if (!subjectRef || subjectRef.enabled === false) continue;
-    const isUserSubject = subjectId === USER_FACE_REFERENCE_ID;
+    const isUserSubject = isUserFaceReferenceId(subjectId);
     const label = isUserSubject ? "用户固定外观" : "角色固定外观";
     const feature = subjectRef.featurePrompt?.trim();
     if (feature) appearanceLines.push(`【${label}】${feature}`);

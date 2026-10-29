@@ -10,7 +10,7 @@ import { loadCharacters } from "@/lib/character-storage";
 import type { Character } from "@/lib/character-types";
 import { ChatFallbackAvatar } from "./chat-fallback-avatar";
 import { useChatWorld } from "./chat-world";
-import { hasUserFaceReference } from "@/lib/user-face-reference";
+import { hasAnyUserFaceReference, hasUserFaceReference } from "@/lib/user-face-reference";
 
 const MAX_SUBJECTS = 3;
 
@@ -33,7 +33,8 @@ export function GroupPhotoPickerModal({
     const world = useChatWorld();
     const [description, setDescription] = useState("");
     const [selectedIds, setSelectedIds] = useState<string[]>(() => (currentCharacterId ? [currentCharacterId] : []));
-    const [includeUser, setIncludeUser] = useState(() => hasUserFaceReference());
+    // 默认勾上「我」：只要任意身份配过锁脸图/外观特征（多身份时可能是世界里那个「我」）
+    const [includeUser, setIncludeUser] = useState(() => hasAnyUserFaceReference());
     const [busy, setBusy] = useState(false);
 
     const contacts = useMemo(() => {
@@ -47,7 +48,8 @@ export function GroupPhotoPickerModal({
     }, [world]);
 
     const userSelfName = world.userIdentity?.name?.trim() || "我";
-    const userHasReference = hasUserFaceReference();
+    // 按本会话角色所属世界解析「我」的脸（多身份时各世界用各自那张）
+    const userHasReference = hasUserFaceReference(currentCharacterId);
     const totalSelected = selectedIds.length + (includeUser ? 1 : 0);
     const canSend = Boolean(description.trim()) && totalSelected > 0 && !busy;
 
