@@ -12,6 +12,8 @@ import {
 import { loadCharacters } from "@/lib/character-storage";
 import type { Character } from "@/lib/character-types";
 import { getChatImageFromIndexedDB, saveChatImageToIndexedDB } from "@/lib/chat-asset-storage";
+import { USER_FACE_REFERENCE_ID } from "@/lib/user-face-reference";
+import { resolveUserIdentity } from "@/lib/settings-storage";
 import {
     fetchImageGenerationModels,
     fetchNovelAiModels,
@@ -470,6 +472,24 @@ export function ImageGenerationSettings() {
 
     const selectedCharacter = characters.find(character => character.id === selectedCharacterId) || null;
     const selectedReference = selectedCharacter ? settings.characterReferences?.[selectedCharacter.id] : undefined;
+    // ── 「我」（用户）的锁脸参考图：与角色同源，只是用保留 id 作键 ──
+    const userIdentity = (() => {
+        try { return resolveUserIdentity(); } catch { return null; }
+    })();
+    const userSelfEntry = {
+        id: USER_FACE_REFERENCE_ID,
+        name: userIdentity?.name?.trim() || "我（用户）",
+        avatar: userIdentity?.avatarUrl || null,
+    };
+    const identityRows = [
+        userSelfEntry,
+        ...characters.map(character => ({ id: character.id, name: character.name, avatar: character.avatar })),
+    ];
+    const isUserSelfSelected = selectedCharacterId === USER_FACE_REFERENCE_ID;
+    const selectedEntry = selectedCharacter
+        ? { id: selectedCharacter.id, name: selectedCharacter.name, avatar: selectedCharacter.avatar }
+        : (isUserSelfSelected ? userSelfEntry : null);
+    const selectedEntryReference = selectedEntry ? settings.characterReferences?.[selectedEntry.id] : undefined;
     const characterListOverflows = characterScrollMetrics.scrollHeight > characterScrollMetrics.clientHeight + 1;
     const characterScrollThumbPercent = characterListOverflows
         ? Math.max(14, characterScrollMetrics.clientHeight / characterScrollMetrics.scrollHeight * 100)
@@ -1026,40 +1046,39 @@ export function ImageGenerationSettings() {
                         className="menu-group max-h-[292px] overflow-y-auto overscroll-contain pr-3"
                         onScroll={syncCharacterScrollMetrics}
                     >
-                        {characters.length === 0 ? (
-                            <div className="ui-empty py-8">
-                                <Camera size={22} />
-                                <span className="menu-desc">暂无角色。</span>
-                            </div>
-                        ) : characters.map(character => {
-                            const preview = referencePreviews[character.id];
-                            const ref = settings.characterReferences?.[character.id];
+                        {identityRows.map(entry => {
+                            const preview = referencePreviews[entry.id];
+                            const ref = settings.characterReferences?.[entry.id];
+                            const isSelf = entry.id === USER_FACE_REFERENCE_ID;
                             return (
                                 <button
-                                    key={character.id}
+                                    key={entry.id}
                                     type="button"
-                                    className={`menu-item w-full text-left ${selectedCharacterId === character.id ? "bg-[var(--c-input)]" : ""}`}
-                                    onClick={() => setSelectedCharacterId(character.id)}
+                                    className={`menu-item w-full text-left ${selectedCharacterId === entry.id ? "bg-[var(--c-input)]" : ""}`}
+                                    onClick={() => setSelectedCharacterId(entry.id)}
                                 >
                                     <span className="h-11 w-11 shrink-0 overflow-hidden rounded-xl bg-[var(--c-input)]">
                                         {preview ? (
                                             <img src={preview} alt="" className="h-full w-full object-cover" />
-                                        ) : character.avatar ? (
-                                            <img src={character.avatar} alt="" className="h-full w-full object-cover" />
+                                        ) : entry.avatar ? (
+                                            <img src={entry.avatar} alt="" className="h-full w-full object-cover" />
                                         ) : (
                                             <span className="flex h-full w-full items-center justify-center ts-13 font-semibold text-[var(--c-icon)]">
-                                                {character.name.slice(0, 1)}
+                                                {entry.name.slice(0, 1)}
                                             </span>
                                         )}
                                     </span>
                                     <span className="min-w-0 flex flex-1 flex-col">
-                                        <span className="menu-label truncate">{character.name}</span>
+                                        <span className="menu-label truncate">
+                                            {entry.name}
+                                            {isSelf ? " · 我" : ""}
+                                        </span>
                                         <span className="menu-desc truncate">
                                             {preview ? (ref?.enabled === false ? "参考图已关闭" : "参考图已启用") : "未上传参考图"}
                                             {ref?.featurePrompt?.trim() ? " · 已设人物特征" : ""}
                                         </span>
                                     </span>
-                                    <ChevronDown size={16} className={selectedCharacterId === character.id ? "-rotate-90 opacity-70" : "opacity-40"} />
+                                    <ChevronDown size={16} className={selectedCharacterId === entry.id ? "-rotate-90 opacity-70" : "opacity-40"} />
                                 </button>
                             );
                         })}
@@ -1083,21 +1102,27 @@ export function ImageGenerationSettings() {
                     )}
                 </div>
 
-                {selectedCharacter && (
+                {selectedEntry && (
                     <div className="menu-group p-4 flex flex-col gap-4">
                         <div className="flex items-center justify-between gap-3">
                             <div className="min-w-0">
-                                <div className="menu-label truncate">{selectedCharacter.name} · 专属生图设定</div>
-                                <div className="menu-desc">只影响这个角色，不会改动角色卡正文。</div>
+                                <div className="menu-label truncate">
+                                    {selectedEntry.name} · 专属生图设定{isUserSelfSelected ? "（我 / 用户锁脸）" : ""}
+                                </div>
+                                <div className="menu-desc">
+                                    {isUserSelfSelected
+                                        ? "画「我」出镜的图时用它锁脸，不会影响角色参考图。"
+                                        : "只影响这个角色，不会改动角色卡正文。"}
+                                </div>
                             </div>
-                            {referencePreviews[selectedCharacter.id] && (
+                            {referencePreviews[selectedEntry.id] && (
                                 <button
                                     type="button"
-                                    className={`ui-btn shrink-0 ${selectedReference?.enabled === false ? "ui-btn-primary" : "ui-btn-outline"}`}
-                                    onClick={() => updateCharacterReference(selectedCharacter.id, { enabled: selectedReference?.enabled === false })}
+                                    className={`ui-btn shrink-0 ${selectedEntryReference?.enabled === false ? "ui-btn-primary" : "ui-btn-outline"}`}
+                                    onClick={() => updateCharacterReference(selectedEntry.id, { enabled: selectedEntryReference?.enabled === false })}
                                 >
                                     <Power size={16} />
-                                    {selectedReference?.enabled === false ? "启用参考图" : "关闭参考图"}
+                                    {selectedEntryReference?.enabled === false ? "启用参考图" : "关闭参考图"}
                                 </button>
                             )}
                         </div>
@@ -1105,12 +1130,16 @@ export function ImageGenerationSettings() {
                         <div className="flex flex-col gap-1">
                             <label className="menu-desc ml-1">专属人物特征提示词</label>
                             <Textarea
-                                value={selectedReference?.featurePrompt || ""}
-                                onChange={(event) => updateCharacterReference(selectedCharacter.id, { featurePrompt: event.target.value })}
+                                value={selectedEntryReference?.featurePrompt || ""}
+                                onChange={(event) => updateCharacterReference(selectedEntry.id, { featurePrompt: event.target.value })}
                                 placeholder="例如：黑色长卷发、灰蓝色眼睛、左眼下有一颗小痣、清冷气质……"
                                 rows={4}
                             />
-                            <span className="menu-desc ml-1">生成该角色图片时自动追加，OpenAI 与 NovelAI 均生效。</span>
+                            <span className="menu-desc ml-1">
+                                {isUserSelfSelected
+                                    ? "图片描述里提到「我 / 自拍 / 合照」时会自动追加，也可给用户生图时强制使用。"
+                                    : "生成该角色图片时自动追加，OpenAI 与 NovelAI 均生效。"}
+                            </span>
                         </div>
 
                         {settings.provider === "novelai" && (
@@ -1121,8 +1150,8 @@ export function ImageGenerationSettings() {
                                 </span>
                                 <span className="menu-right settings-tools-menu-toggle">
                                     <Toggle
-                                        checked={selectedReference?.novelAiFeaturePromptEnabled !== false}
-                                        onChange={(novelAiFeaturePromptEnabled) => updateCharacterReference(selectedCharacter.id, { novelAiFeaturePromptEnabled })}
+                                        checked={selectedEntryReference?.novelAiFeaturePromptEnabled !== false}
+                                        onChange={(novelAiFeaturePromptEnabled) => updateCharacterReference(selectedEntry.id, { novelAiFeaturePromptEnabled })}
                                         className="settings-toggle-control"
                                     />
                                 </span>
@@ -1140,16 +1169,16 @@ export function ImageGenerationSettings() {
                                         input.accept = "image/*";
                                         input.onchange = async () => {
                                             const file = input.files?.[0];
-                                            if (file) await uploadReference(selectedCharacter.id, file);
+                                            if (file) await uploadReference(selectedEntry.id, file);
                                         };
                                         input.click();
                                     }}
                                 >
                                     <Upload size={16} />
-                                    {referencePreviews[selectedCharacter.id] ? "更换参考图" : "选择参考图"}
+                                    {referencePreviews[selectedEntry.id] ? "更换参考图" : "选择参考图"}
                                 </button>
-                                {referencePreviews[selectedCharacter.id] && (
-                                    <button type="button" className="ui-btn ui-btn-outline flex-1" onClick={() => openFaceCrop(selectedCharacter.id)}>
+                                {referencePreviews[selectedEntry.id] && (
+                                    <button type="button" className="ui-btn ui-btn-outline flex-1" onClick={() => openFaceCrop(selectedEntry.id)}>
                                         <ScanFace size={16} />
                                         选取脸部
                                     </button>

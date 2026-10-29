@@ -157,6 +157,8 @@ export async function retryMomentGeneratedPhoto(
         const generated = await generateImageFromConfiguredApi({
             description,
             characterId: post.authorType === "character" ? post.authorId : undefined,
+            // 用户自己发的朋友圈配图：用「我」的锁脸参考图
+            useUserReference: post.authorType === "user",
             appId: "moments",
             useReferenceImage: effectiveUseReference,
         });

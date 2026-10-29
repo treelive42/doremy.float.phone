@@ -10,6 +10,18 @@ export const CHARACTER_WORLDS_UPDATED_EVENT = "character-worlds-updated";
 /** 切换「当前世界」时广播：角色画布、聊天会话列表、通讯录共用同一份记忆并互相跟上 */
 export const CURRENT_WORLD_CHANGED_EVENT = "character-current-world-changed";
 export const DEFAULT_CHARACTER_WORLD_ID = "world_default";
+/**
+ * 画布上「我」（用户档案卡）的虚拟节点 id。
+ * 它不是角色，也不在 memberIds 里，但可以参与世界关系拉线：
+ * 关系端点允许是这个特殊 id，代表「用户」。
+ */
+export const CHARACTER_WORLD_USER_SELF_ID = "__world_user_self__";
+
+/** 关系端点是否属于这个世界的合法节点（角色成员 或 用户自己） */
+export function isWorldRelationNode(group: CharacterWorldGroup, nodeId: string): boolean {
+    if (nodeId === CHARACTER_WORLD_USER_SELF_ID) return true;
+    return group.memberIds.includes(nodeId);
+}
 // 与角色 App 的画布 tab 共用同一个 key（存量用户的记忆零迁移）
 const CURRENT_WORLD_KEY = "ai_phone_character_app_world_v1";
 
@@ -102,6 +114,8 @@ function normalizeGroups(groups: CharacterWorldGroup[], characters: Character[])
             }
 
             const memberSet = new Set(members);
+            // 关系端点可以是世界成员，也可以是「我」这张用户档案卡
+            const isNode = (nodeId: string) => memberSet.has(nodeId) || nodeId === CHARACTER_WORLD_USER_SELF_ID;
             const relations = (Array.isArray(group.relations) ? group.relations : [])
                 .filter(relation => (
                     relation
@@ -110,8 +124,8 @@ function normalizeGroups(groups: CharacterWorldGroup[], characters: Character[])
                     && typeof relation.toCharacterId === "string"
                     && typeof relation.label === "string"
                     && relation.label.trim()
-                    && memberSet.has(relation.fromCharacterId)
-                    && memberSet.has(relation.toCharacterId)
+                    && isNode(relation.fromCharacterId)
+                    && isNode(relation.toCharacterId)
                     && relation.fromCharacterId !== relation.toCharacterId
                 ))
                 .map(relation => ({
@@ -366,8 +380,9 @@ export function addCharacterWorldRelation(groupId: string, fromCharacterId: stri
     const now = new Date().toISOString();
     saveCharacterWorldGroups(loadCharacterWorldGroups().map(group => {
         if (group.id !== groupId) return group;
-        const memberSet = new Set(group.memberIds);
-        if (!memberSet.has(fromCharacterId) || !memberSet.has(toCharacterId)) return group;
+        // 端点允许是世界成员，也允许是「我」这张用户档案卡
+        const isNode = (nodeId: string) => nodeId === CHARACTER_WORLD_USER_SELF_ID || group.memberIds.includes(nodeId);
+        if (!isNode(fromCharacterId) || !isNode(toCharacterId)) return group;
         return {
             ...group,
             relations: [
@@ -526,9 +541,14 @@ export function formatCharacterRelationsForPrompt(characterId: string): string {
         lines.push(`同世界角色：${memberNames.join("、")}。`);
     }
 
+    // 拉线端点可能是「我」那张用户档案卡：用该世界的用户称呼显示
+    const selfName = selfIdentity?.name?.trim() || "用户";
+    const resolveNodeName = (nodeId: string): string | null =>
+        nodeId === CHARACTER_WORLD_USER_SELF_ID ? selfName : (nameById.get(nodeId) ?? null);
+
     for (const relation of group.relations) {
-        const fromName = nameById.get(relation.fromCharacterId);
-        const toName = nameById.get(relation.toCharacterId);
+        const fromName = resolveNodeName(relation.fromCharacterId);
+        const toName = resolveNodeName(relation.toCharacterId);
         if (!fromName || !toName) continue;
         lines.push(`${fromName}是${toName}的${relation.label}。`);
     }
@@ -538,11 +558,25 @@ export function formatCharacterRelationsForPrompt(characterId: string): string {
     // 没有简介的角色自然跳过（未生成时行为与旧版一致）。
     const characterById = new Map(characters.map(character => [character.id, character]));
     const counterpartIds = new Set<string>();
-    for (const relation of group.relations) {
-        if (relation.fromCharacterId === characterId) counterpartIds.add(relation.toCharacterId);
-        else if (relation.toCharacterId === characterId) counterpartIds.add(relation.fromCharacterId);
-    }
     const briefLines: string[] = [];
+    // 这个角色和「我」拉过线时，把用户在这个世界的档案也当作可引用的一方
+    let linkedToSelf = false;
+    for (const relation of group.relations) {
+        if (relation.fromCharacterId === characterId) {
+            if (relation.toCharacterId === CHARACTER_WORLD_USER_SELF_ID) linkedToSelf = true;
+            else counterpartIds.add(relation.toCharacterId);
+        } else if (relation.toCharacterId === characterId) {
+            if (relation.fromCharacterId === CHARACTER_WORLD_USER_SELF_ID) linkedToSelf = true;
+            else counterpartIds.add(relation.fromCharacterId);
+        }
+    }
+    if (linkedToSelf && selfIdentity) {
+        const selfFacts = [selfIdentity.gender, selfIdentity.age, selfIdentity.occupation]
+            .filter((value): value is string => Boolean(value && value.trim()))
+            .join("、");
+        const selfBrief = (selfIdentity.bio || "").trim() || (group.userPersona || "").trim();
+        briefLines.push(`- ${selfName}${selfFacts ? `（${selfFacts}）` : ""}${selfBrief ? `：${selfBrief}` : "：当前用户"}`);
+    }
     for (const counterpartId of counterpartIds) {
         const counterpart = characterById.get(counterpartId);
         const brief = counterpart?.briefPersona?.trim();

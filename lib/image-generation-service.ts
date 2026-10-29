@@ -2,6 +2,7 @@ import type { ImageGenerationSettings, NovelAiPreset } from "./settings-types";
 import { loadBindingConfig, loadImageGenerationSettings, resolveBinding, DEFAULT_NOVELAI_PRESET } from "./settings-storage";
 import { applyImageGenerationBinding } from "./image-generation-binding";
 import JSZip from "jszip";
+import { USER_FACE_REFERENCE_ID, withUserFacePrompt } from "./user-face-reference";
 import { getChatImageFromIndexedDB } from "./chat-asset-storage";
 import { storeMediaBlob } from "./media-cache-storage";
 import { throwIfAborted } from "./abort-utils";
@@ -746,6 +747,11 @@ export async function generateImageFromConfiguredApi(params: {
   /** 内容所属 APP；用于按“角色 > APP > 全局”解析生图方案。 */
   appId?: string;
   useReferenceImage?: boolean;
+  /**
+   * 画里的主角是「用户」而不是角色：参考图/人物特征改用用户锁脸设置。
+   * 不传 characterId 时也会自动指向用户参考图。
+   */
+  useUserReference?: boolean;
   settings?: ImageGenerationSettings;
   signal?: AbortSignal;
 }): Promise<ImageGenerationResult | null> {
@@ -759,8 +765,17 @@ export async function generateImageFromConfiguredApi(params: {
       );
   if (!settings.enabled) return null;
 
-  const description = params.description.trim();
-  if (!description) return null;
+  const rawDescription = params.description.trim();
+  if (!rawDescription) return null;
+  // 画的是「我」：参考图/人物特征换用用户锁脸设置
+  const referenceSubjectId = params.useUserReference
+    ? USER_FACE_REFERENCE_ID
+    : params.characterId;
+  const description = params.useUserReference
+    ? withUserFacePrompt(rawDescription, true)
+    : params.characterId
+      ? rawDescription
+      : withUserFacePrompt(rawDescription);
 
   // NovelAI 模式
   if (settings.provider === "novelai") {
@@ -774,8 +789,8 @@ export async function generateImageFromConfiguredApi(params: {
 
     const positiveParts: string[] = [];
     if (activePreset.positivePrompt?.trim()) positiveParts.push(activePreset.positivePrompt.trim());
-    const novelAiCharacterReference = params.characterId
-      ? settings.characterReferences?.[params.characterId]
+    const novelAiCharacterReference = referenceSubjectId
+      ? settings.characterReferences?.[referenceSubjectId]
       : undefined;
     const characterFeaturePrompt = novelAiCharacterReference?.novelAiFeaturePromptEnabled !== false
       ? novelAiCharacterReference?.featurePrompt?.trim()
@@ -812,10 +827,11 @@ export async function generateImageFromConfiguredApi(params: {
   const openaiSettings = openaiPreset ? { ...settings, ...openaiPreset } : settings;
   if (!openaiSettings.apiKey.trim() || !openaiSettings.baseUrl.trim() || !openaiSettings.model.trim()) return null;
 
-  const reference = params.characterId ? settings.characterReferences?.[params.characterId] : undefined;
-  // 「非自拍不使用参考图」开关已从生图设置页删除：参考图启用后始终参与生成
+  const reference = referenceSubjectId ? settings.characterReferences?.[referenceSubjectId] : undefined;
+  // 「非自拍不使用参考图」开关已从生图设置页删除：参考图启用后始终参与生成。
+  // 明确指出「画的是我」时（useUserReference），默认就要锁脸，不必再传 useReferenceImage。
   const shouldUseReference = Boolean(
-    params.useReferenceImage
+    (params.useReferenceImage || (params.useUserReference && !params.characterId))
     && reference?.assetId
     && reference.enabled !== false,
   );

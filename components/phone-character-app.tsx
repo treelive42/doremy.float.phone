@@ -33,6 +33,7 @@ import {
   setCharacterWorldUserIdentity,
   setCharacterWorldUserPersona,
   setCharacterWorldUserCard,
+  CHARACTER_WORLD_USER_SELF_ID,
   CHARACTER_WORLDS_UPDATED_EVENT,
   CURRENT_WORLD_CHANGED_EVENT,
   DEFAULT_CHARACTER_WORLD_ID,
@@ -555,6 +556,10 @@ function CharListView({
     return found ?? identities[0] ?? null;
   })();
   const userSelfName = userSelfIdentity?.name || "我";
+  const userSelfCard = currentGroup?.userCard ?? { x: 18, y: 24, rot: -4 };
+  // 节点名解析：角色名 / 「我」（用户档案卡也能被拉线）
+  const nodeNameById = new Map(nameById);
+  nodeNameById.set(CHARACTER_WORLD_USER_SELF_ID, userSelfName);
   // 连线与世界观关系同步：同一对角色的多条关系合并为一条线
   const relationLines: CanvasRelationLine[] = (() => {
     const pairs = new Map<string, CanvasRelationLine>();
@@ -1293,23 +1298,24 @@ function CharListView({
               );
             })}
 
-            {/* 「我的档案卡」：这个世界里的我也是一张角色卡，可拖动、点开编辑 */}
+            {/* 「我的档案卡」：这个世界里的我也是一张角色卡，可拖动、可拉线、点开编辑 */}
             {userSelfIdentity && (() => {
-              const card = currentGroup?.userCard ?? { x: 18, y: 24, rot: -4 };
+              const card = userSelfCard;
               return (
                 <DraggableNode
                   key="world-user-self-card"
-                  id="world_user_self_card"
+                  id={CHARACTER_WORLD_USER_SELF_ID}
                   x={card.x}
                   y={card.y}
                   rot={card.rot}
                   zIndex={95}
                   onDragEnd={(_id, newX, newY) => onUpdateUserCard({ x: newX, y: newY, rot: card.rot })}
                   onClick={() => setShowWorldEditor(true)}
-                  className={`char-polaroid char-polaroid-board-item ratio-portrait ${linkFromId === "world_user_self_card" ? "wt-link-source" : ""}`}
+                  className={`char-polaroid char-polaroid-board-item ratio-portrait ${linkFromId === CHARACTER_WORLD_USER_SELF_ID ? "wt-link-source" : ""}`}
                   w={110}
                   isEditing={isEditing}
-                  onEditTap={() => setShowWorldEditor(true)}
+                  // 编辑模式下点「我」= 起线/落线（和角色卡一致）；查看模式下点它打开卷宗编辑
+                  onEditTap={() => handleCharEditTap(CHARACTER_WORLD_USER_SELF_ID)}
                   trashBinRef={trashBinRef}
                   onDragActiveChange={setIsAnyDragging}
                   onOverTrashChange={setOverTrashBin}
@@ -1333,11 +1339,20 @@ function CharListView({
             {/* 把拉线放在所有卡片的最后渲染，并设置超高 zIndex，使其盖在所有照片之上 */}
             <svg className="absolute top-0 left-0 w-[10000px] h-[10000px] pointer-events-none overflow-visible" style={{ zIndex: 99999 }}>
               {relationLines.map(line => {
-                const a = worldCharacters.find(c => c.id === line.aId);
-                const b = worldCharacters.find(c => c.id === line.bId);
-                if (!a || !b || a.canvasX === undefined || a.canvasY === undefined || b.canvasX === undefined || b.canvasY === undefined) return null;
-                const x1 = a.canvasX + 60, y1 = a.canvasY + 60;
-                const x2 = b.canvasX + 60, y2 = b.canvasY + 60;
+                // 端点可能是角色，也可能是「我」这张档案卡
+                const pointOf = (nodeId: string): { x: number; y: number } | null => {
+                  if (nodeId === CHARACTER_WORLD_USER_SELF_ID) {
+                    return userSelfIdentity ? { x: userSelfCard.x, y: userSelfCard.y } : null;
+                  }
+                  const node = worldCharacters.find(c => c.id === nodeId);
+                  if (!node || node.canvasX === undefined || node.canvasY === undefined) return null;
+                  return { x: node.canvasX, y: node.canvasY };
+                };
+                const a = pointOf(line.aId);
+                const b = pointOf(line.bId);
+                if (!a || !b) return null;
+                const x1 = a.x + 60, y1 = a.y + 60;
+                const x2 = b.x + 60, y2 = b.y + 60;
                 return (
                   <g key={line.key}>
                     {/* 连线阴影 (更淡的阴影) */}
@@ -1546,8 +1561,8 @@ function CharListView({
       {/* 拉线：关系标签输入 */}
       {linkTo && currentGroup && (
         <RelationLinkDialog
-          fromName={nameById.get(linkTo.fromId) ?? "?"}
-          toName={nameById.get(linkTo.toId) ?? "?"}
+          fromName={nodeNameById.get(linkTo.fromId) ?? "?"}
+          toName={nodeNameById.get(linkTo.toId) ?? "?"}
           onConfirm={label => {
             addCharacterWorldRelation(currentGroup.id, linkTo.fromId, linkTo.toId, label);
             setLinkTo(null);
@@ -1563,7 +1578,7 @@ function CharListView({
             (r.fromCharacterId === pairSheet.aId && r.toCharacterId === pairSheet.bId)
             || (r.fromCharacterId === pairSheet.bId && r.toCharacterId === pairSheet.aId)
           )}
-          nameById={nameById}
+          nameById={nodeNameById}
           onDelete={relationId => deleteCharacterWorldRelation(currentGroup.id, relationId)}
           onClose={() => setPairSheet(null)}
         />
