@@ -1221,10 +1221,33 @@ export function saveUserIdentities(identities: UserIdentity[]): void {
 
 export const USER_IDENTITIES_UPDATED_EVENT = "user-identities-updated";
 
+// --- 世界级用户身份（由 character-world-storage 注册，避免模块循环依赖） ---
+// 世界卷宗里可以为每个世界指定「这里的我是谁」。为了让庞大的 settings-storage
+// 不必反向 import 世界存储（会造成 import 环），这里留一个注册口，
+// character-world-storage 加载时把自己的查询函数注册进来。
+type WorldIdentityResolver = (characterId?: string) => string | null;
+let _worldIdentityResolver: WorldIdentityResolver | null = null;
+
+export function registerWorldIdentityResolver(resolver: WorldIdentityResolver | null): void {
+    _worldIdentityResolver = resolver;
+}
+
+/** 角色所属世界绑定的用户身份 id（未绑定 / 未注册解析器时返回 null） */
+function resolveWorldIdentityId(characterId?: string): string | null {
+    if (!characterId || !_worldIdentityResolver) return null;
+    try {
+        return _worldIdentityResolver(characterId);
+    } catch {
+        return null;
+    }
+}
+
 /**
  * Resolve user identity through the binding cascade:
- *   global defaults → APP defaults → character defaults → character APP overrides.
- * Falls back to first identity if binding has no userIdentityId set.
+ *   global defaults → APP defaults → character defaults → character APP overrides
+ *   → 角色所属世界的身份（A 档世界隔离：每个世界独立的「我」）。
+ * Falls back to first identity if nothing is set.
+ * 显式绑定（角色/APP/全局）优先级高于世界绑定，保证老用户行为不变。
  */
 export function resolveUserIdentity(characterId?: string, appId?: string): UserIdentity | null {
     const identities = loadUserIdentities();
@@ -1233,6 +1256,11 @@ export function resolveUserIdentity(characterId?: string, appId?: string): UserI
     const resolved = resolveBinding(config, characterId, appId);
     if (resolved.userIdentityId) {
         return identities.find(i => i.id === resolved.userIdentityId) || identities[0];
+    }
+    const worldIdentityId = resolveWorldIdentityId(characterId);
+    if (worldIdentityId) {
+        const worldIdentity = identities.find(i => i.id === worldIdentityId);
+        if (worldIdentity) return worldIdentity;
     }
     return identities[0];
 }

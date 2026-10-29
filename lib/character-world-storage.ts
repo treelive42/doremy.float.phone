@@ -1,5 +1,6 @@
 import { loadCharacters } from "./character-storage";
 import { loadChatContacts } from "./chat-storage";
+import { loadUserIdentities, registerWorldIdentityResolver } from "./settings-storage";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 import type { Character } from "./character-types";
 import type { MomentComment, MomentLike, MomentPost } from "./moments-types";
@@ -21,12 +22,26 @@ export type CharacterWorldRelation = {
     label: string;
 };
 
+/** 「这个世界的我」——用户在某份卷宗里的档案卡（画在画布上，可拉线） */
+export type CharacterWorldUserCard = {
+    /** 位置与贴纸角度（每个世界一份，默认摆在左上角） */
+    x: number;
+    y: number;
+    rot: number;
+};
+
 export type CharacterWorldGroup = {
     id: string;
     name: string;
     description: string;
     memberIds: string[];
     relations: CharacterWorldRelation[];
+    /** 这个世界的「我」用哪份用户身份（UserIdentity.id）。留空 = 沿用全局默认身份 */
+    userIdentityId?: string;
+    /** 这个世界的「我」的额外设定：会注入该世界所有角色的上下文 */
+    userPersona?: string;
+    /** 「我的档案卡」在画布上的位置；留空 = 用默认位置 */
+    userCard?: CharacterWorldUserCard;
     createdAt: string;
     updatedAt: string;
 };
@@ -106,12 +121,30 @@ function normalizeGroups(groups: CharacterWorldGroup[], characters: Character[])
 
             if (relations.length !== (Array.isArray(group.relations) ? group.relations.length : 0)) changed = true;
 
+            const rawUserCard = group.userCard as Partial<CharacterWorldUserCard> | undefined;
+            const userCard = rawUserCard
+                && Number.isFinite(rawUserCard.x)
+                && Number.isFinite(rawUserCard.y)
+                ? {
+                    x: Number(rawUserCard.x),
+                    y: Number(rawUserCard.y),
+                    rot: Number.isFinite(rawUserCard.rot) ? Number(rawUserCard.rot) : 0,
+                }
+                : undefined;
+
             return {
                 id: group.id,
                 name: group.name.trim() || "未命名世界",
                 description: typeof group.description === "string" ? group.description.trim() : "",
                 memberIds: members,
                 relations,
+                userIdentityId: typeof group.userIdentityId === "string" && group.userIdentityId.trim()
+                    ? group.userIdentityId.trim()
+                    : undefined,
+                userPersona: typeof group.userPersona === "string" && group.userPersona.trim()
+                    ? group.userPersona
+                    : undefined,
+                userCard,
                 createdAt: group.createdAt || now,
                 updatedAt: group.updatedAt || now,
             };
@@ -223,6 +256,76 @@ export function updateCharacterWorldDescription(groupId: string, description: st
             ? { ...group, description, updatedAt: now }
             : group
     ));
+}
+
+/** 设定某个世界里的「我」用哪份用户身份（传空字符串 = 清除，沿用全局默认身份） */
+export function setCharacterWorldUserIdentity(groupId: string, identityId: string): void {
+    const now = new Date().toISOString();
+    const wanted = (identityId ?? "").trim();
+    saveCharacterWorldGroups(loadCharacterWorldGroups().map(group =>
+        group.id === groupId
+            ? { ...group, userIdentityId: wanted || undefined, updatedAt: now }
+            : group
+    ));
+}
+
+/** 设定某个世界里的「我」的额外设定（注入该世界角色上下文的自我人设） */
+export function setCharacterWorldUserPersona(groupId: string, persona: string): void {
+    const now = new Date().toISOString();
+    const next = (persona ?? "").trim();
+    saveCharacterWorldGroups(loadCharacterWorldGroups().map(group =>
+        group.id === groupId
+            ? { ...group, userPersona: next || undefined, updatedAt: now }
+            : group
+    ));
+}
+
+/** 记住「我的档案卡」在某个世界画布上的位置 */
+export function setCharacterWorldUserCard(groupId: string, card: CharacterWorldUserCard): void {
+    if (!Number.isFinite(card.x) || !Number.isFinite(card.y)) return;
+    const now = new Date().toISOString();
+    saveCharacterWorldGroups(loadCharacterWorldGroups().map(group =>
+        group.id === groupId
+            ? {
+                ...group,
+                userCard: {
+                    x: card.x,
+                    y: card.y,
+                    rot: Number.isFinite(card.rot) ? card.rot : 0,
+                },
+                updatedAt: now,
+            }
+            : group
+    ));
+}
+
+/**
+ * 解析某个世界里的「我」：优先世界绑定的身份，否则回落到默认（第一份）身份。
+ * 群聊这类「没有单一对话角色」的场景用世界 id 直接取。
+ */
+export function resolveWorldUserIdentity(worldId: string) {
+    let identities: ReturnType<typeof loadUserIdentities> = [];
+    try { identities = loadUserIdentities(); } catch { /* 未水合时忽略 */ }
+    if (identities.length === 0) return null;
+    const boundId = getWorldUserIdentityIdByWorld(worldId);
+    if (boundId) {
+        const bound = identities.find(identity => identity.id === boundId);
+        if (bound) return bound;
+    }
+    return identities[0];
+}
+
+/** 角色所属世界绑定的「我」的身份 id；未绑定时返回 null（回落到全局默认身份） */
+export function getWorldUserIdentityId(characterId?: string | null): string | null {
+    if (!characterId) return null;
+    const group = loadCharacterWorldGroups().find(item => item.memberIds.includes(characterId));
+    return group?.userIdentityId?.trim() || null;
+}
+
+/** 某个世界绑定的「我」的身份 id */
+export function getWorldUserIdentityIdByWorld(worldId: string): string | null {
+    const group = loadCharacterWorldGroups().find(item => item.id === worldId);
+    return group?.userIdentityId?.trim() || null;
 }
 
 export function deleteCharacterWorldGroup(groupId: string): void {
@@ -391,6 +494,28 @@ export function formatCharacterRelationsForPrompt(characterId: string): string {
     if (worldDescription) {
         lines.push(`世界观描述：${worldDescription}`);
     }
+
+    // 这个世界里的「用户」是谁：角色感知到的「你」跟着世界走，
+    // 避免 1World 的角色把 2World 里的我当成同一个人。
+    const identities = (() => {
+        try { return loadUserIdentities(); } catch { return []; }
+    })();
+    const selfIdentity = group.userIdentityId
+        ? identities.find(identity => identity.id === group.userIdentityId)
+        : (groups.length > 1 || group.userPersona ? identities[0] : undefined);
+    if (selfIdentity) {
+        const selfFacts = [selfIdentity.gender, selfIdentity.age, selfIdentity.occupation]
+            .filter((value): value is string => Boolean(value && value.trim()))
+            .join("、");
+        lines.push(`用户在这个世界的身份：${selfIdentity.name}${selfFacts ? `（${selfFacts}）` : ""}。`);
+        const selfBrief = (selfIdentity.bio || "").trim();
+        if (selfBrief) lines.push(`用户简介：${selfBrief}`);
+        const selfCustom = (selfIdentity.customSettings || "").trim();
+        if (selfCustom) lines.push(`用户设定：${selfCustom}`);
+    }
+    if (group.userPersona?.trim()) {
+        lines.push(`用户在这个世界的额外设定：${group.userPersona.trim()}`);
+    }
     if (memberNames.length > 0 && (groups.length > 1 || group.id !== DEFAULT_CHARACTER_WORLD_ID || worldDescription)) {
         lines.push(`同世界角色：${memberNames.join("、")}。`);
     }
@@ -425,3 +550,15 @@ export function formatCharacterRelationsForPrompt(characterId: string): string {
 
     return lines.join("\n");
 }
+
+// ── 把自己注册进 settings-storage 的身份解析链 ──
+// 世界卷宗给某个世界绑定了「我」，resolveUserIdentity(characterId) 就会用那份身份。
+// 注册式的好处：settings-storage 不需要反向 import 本模块，避免 import 环。
+registerWorldIdentityResolver((characterId) => {
+    if (!characterId) return null;
+    try {
+        return getWorldUserIdentityId(characterId);
+    } catch {
+        return null;
+    }
+});

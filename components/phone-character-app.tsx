@@ -30,11 +30,16 @@ import {
   updateCharacterWorldDescription,
   getCurrentWorldId,
   setCurrentWorldId as persistCurrentWorldId,
+  setCharacterWorldUserIdentity,
+  setCharacterWorldUserPersona,
+  setCharacterWorldUserCard,
   CHARACTER_WORLDS_UPDATED_EVENT,
   CURRENT_WORLD_CHANGED_EVENT,
   DEFAULT_CHARACTER_WORLD_ID,
   type CharacterWorldGroup,
+  type CharacterWorldUserCard,
 } from "@/lib/character-world-storage";
+import { loadUserIdentities } from "@/lib/settings-storage";
 import { WorldTabStrip, WorldCaseSheet, NewWorldSheet } from "@/components/character/world-tabs";
 import { RelationLinkDialog, RelationPairSheet } from "@/components/character/relation-dialogs";
 import { loadMomentsConfig, saveMomentsConfig } from "@/lib/moments-storage";
@@ -207,6 +212,8 @@ export function PhoneCharacterApp({ onClose, onNotice }: PhoneCharacterAppProps)
   // 当前世界存进 lib/character-world-storage 的共享记忆里：微信那边的会话列表/通讯录
   // 也会读同一个值，两边切换任一入口都会通过 CURRENT_WORLD_CHANGED_EVENT 互相跟上。
   const [worldGroups, setWorldGroups] = useState<CharacterWorldGroup[]>(() => loadCharacterWorldGroups());
+  // 用户身份列表：世界卷宗里可以给每个世界指定「这里的我是谁」
+  const [identities, setIdentities] = useState(() => loadUserIdentities());
   const [currentWorldId, setCurrentWorldId] = useState<string>(() => getCurrentWorldId());
   useEffect(() => {
     const reload = () => setWorldGroups(loadCharacterWorldGroups());
@@ -297,6 +304,11 @@ export function PhoneCharacterApp({ onClose, onNotice }: PhoneCharacterAppProps)
             }}
             onClearPendingPlacement={() => setPendingPlacementChar(null)}
             onNotice={onNotice}
+            identities={identities}
+            onUpdateUserCard={(card: CharacterWorldUserCard) => {
+              setCharacterWorldUserCard(safeWorldId, card);
+              setWorldGroups(loadCharacterWorldGroups());
+            }}
           />
         )}
 
@@ -494,6 +506,8 @@ function CharListView({
   onPlacementDone,
   onClearPendingPlacement,
   onNotice,
+  identities,
+  onUpdateUserCard,
 }: {
   characters: Character[];
   bgItems: CanvasBgItem[];
@@ -510,6 +524,10 @@ function CharListView({
   onPlacementDone: (char: Character) => void;
   onClearPendingPlacement: () => void;
   onNotice: (text: string) => void;
+  /** 用户身份列表（世界卷宗里给「这个世界的我」挑身份） */
+  identities: { id: string; name: string; avatarUrl?: string; bio?: string; occupation?: string }[];
+  /** 记住「我的档案卡」在当前世界的画布位置 */
+  onUpdateUserCard: (card: CharacterWorldUserCard) => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [showNpcGen, setShowNpcGen] = useState(false);
@@ -524,6 +542,13 @@ function CharListView({
   const worldBgItems = (bgItems || []).filter(item => (item.worldId ?? DEFAULT_CHARACTER_WORLD_ID) === currentWorldId);
   const memberCounts = new Map(worldGroups.map(g => [g.id, g.memberIds.length]));
   const nameById = new Map(characters.map(c => [c.id, c.name || "未命名"]));
+  // 这个世界里的「我」：卷宗绑定过身份就用那份，否则沿用全局默认身份（列表第一篇）
+  const userSelfIdentity = (() => {
+    const wanted = currentGroup?.userIdentityId;
+    const found = wanted ? identities.find(identity => identity.id === wanted) : identities[0];
+    return found ?? identities[0] ?? null;
+  })();
+  const userSelfName = userSelfIdentity?.name || "我";
   // 连线与世界观关系同步：同一对角色的多条关系合并为一条线
   const relationLines: CanvasRelationLine[] = (() => {
     const pairs = new Map<string, CanvasRelationLine>();
@@ -1262,6 +1287,43 @@ function CharListView({
               );
             })}
 
+            {/* 「我的档案卡」：这个世界里的我也是一张角色卡，可拖动、点开编辑 */}
+            {userSelfIdentity && (() => {
+              const card = currentGroup?.userCard ?? { x: 18, y: 24, rot: -4 };
+              return (
+                <DraggableNode
+                  key="world-user-self-card"
+                  id="world_user_self_card"
+                  x={card.x}
+                  y={card.y}
+                  rot={card.rot}
+                  zIndex={95}
+                  onDragEnd={(_id, newX, newY) => onUpdateUserCard({ x: newX, y: newY, rot: card.rot })}
+                  onClick={() => setShowWorldEditor(true)}
+                  className={`char-polaroid char-polaroid-board-item ratio-portrait ${linkFromId === "world_user_self_card" ? "wt-link-source" : ""}`}
+                  w={110}
+                  isEditing={isEditing}
+                  onEditTap={() => setShowWorldEditor(true)}
+                  trashBinRef={trashBinRef}
+                  onDragActiveChange={setIsAnyDragging}
+                  onOverTrashChange={setOverTrashBin}
+                  zoom={pan.zoom}
+                  pinchRef={pinchRef}
+                >
+                  <div className="char-polaroid-tape-base char-polaroid-tape-black" style={{ top: -10, width: 44, transform: "translateX(-50%) rotate(-3deg)" }} />
+                  <div className="char-clue-label" style={{ top: -10, right: -6, transform: `rotate(${-(card.rot || 0) - 4}deg)` }}>ME</div>
+                  <div className="char-polaroid-img-wrapper" style={{ boxShadow: "inset 0 0 10px rgba(0,0,0,0.1)" }}>
+                    {userSelfIdentity.avatarUrl ? (
+                      <img src={userSelfIdentity.avatarUrl} alt={userSelfName} className="char-polaroid-img" draggable={false} />
+                    ) : (
+                      <CharAvatarFallback name={userSelfName} size="100%" />
+                    )}
+                  </div>
+                  <div className="char-polaroid-text" style={{ fontSize: 12.5 }}>{userSelfName}</div>
+                </DraggableNode>
+              );
+            })()}
+
             {/* 把拉线放在所有卡片的最后渲染，并设置超高 zIndex，使其盖在所有照片之上 */}
             <svg className="absolute top-0 left-0 w-[10000px] h-[10000px] pointer-events-none overflow-visible" style={{ zIndex: 99999 }}>
               {relationLines.map(line => {
@@ -1444,8 +1506,14 @@ function CharListView({
       {showWorldEditor && currentGroup && (
         <WorldCaseSheet
           group={currentGroup}
+          identities={identities}
           onRename={name => renameCharacterWorldGroup(currentGroup.id, name)}
           onUpdateDescription={description => updateCharacterWorldDescription(currentGroup.id, description)}
+          onUpdateUserSelf={(identityId, persona) => {
+            // 这个世界的「我」：身份卡 + 额外自我设定（都会注入该世界角色的上下文）
+            setCharacterWorldUserIdentity(currentGroup.id, identityId);
+            setCharacterWorldUserPersona(currentGroup.id, persona);
+          }}
           onDelete={() => {
             deleteCharacterWorldGroup(currentGroup.id);
             setShowWorldEditor(false);

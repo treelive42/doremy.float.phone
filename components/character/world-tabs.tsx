@@ -56,28 +56,41 @@ export function WorldTabStrip({
   );
 }
 
-/** 卷宗编辑：改名 / 世界观描述 / 删除（角色并回默认世界） */
+/** 世界编辑：改名 / 世界观描述 / 这个世界的我 / 删除（角色并回默认世界） */
 export function WorldCaseSheet({
   group,
+  identities = [],
   onRename,
   onUpdateDescription,
+  onUpdateUserSelf,
   onDelete,
   onClose,
 }: {
   group: CharacterWorldGroup;
+  /** 可选的用户身份（来自设置里的用户身份列表） */
+  identities?: { id: string; name: string; avatarUrl?: string; bio?: string; occupation?: string }[];
   onRename: (name: string) => void;
   onUpdateDescription: (description: string) => void;
+  /** 设定这个世界的「我」：身份 id（空串 = 沿用全局默认身份）+ 额外自我设定 */
+  onUpdateUserSelf?: (identityId: string, persona: string) => void;
   onDelete: () => void;
   onClose: () => void;
 }) {
   const [name, setName] = useState(group.name);
   const [description, setDescription] = useState(group.description);
+  const [userIdentityId, setUserIdentityId] = useState(group.userIdentityId ?? "");
+  const [userPersona, setUserPersona] = useState(group.userPersona ?? "");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const isDefault = group.id === DEFAULT_CHARACTER_WORLD_ID;
+  const defaultIdentity = identities[0];
+  const pickedIdentity = identities.find(identity => identity.id === userIdentityId) ?? defaultIdentity;
 
   const save = () => {
     if (name.trim() && name.trim() !== group.name) onRename(name.trim());
     if (description.trim() !== group.description) onUpdateDescription(description.trim());
+    if (onUpdateUserSelf && (userIdentityId !== (group.userIdentityId ?? "") || userPersona.trim() !== (group.userPersona ?? "").trim())) {
+      onUpdateUserSelf(userIdentityId, userPersona.trim());
+    }
     onClose();
   };
 
@@ -102,6 +115,58 @@ export function WorldCaseSheet({
           onChange={e => setDescription(e.target.value)}
           placeholder="写下这个世界的背景、时代、阵营边界、共同常识或角色互动前提…"
         />
+
+        {/* 这个世界的「我」：不同世界可以是不同的人设（身份、称呼、背景） */}
+        <label className="wt-paper-label">这个世界的我</label>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+          <div style={{
+            width: 40,
+            height: 40,
+            borderRadius: "50%",
+            overflow: "hidden",
+            flexShrink: 0,
+            background: "#ddd8c8",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontWeight: 700,
+            color: "#6b5d47",
+          }}>
+            {pickedIdentity?.avatarUrl ? (
+              <img src={pickedIdentity.avatarUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            ) : (
+              (pickedIdentity?.name || "我").slice(0, 1)
+            )}
+          </div>
+          <select
+            className="wt-paper-input"
+            style={{ flex: 1, minWidth: 0 }}
+            value={userIdentityId}
+            onChange={e => setUserIdentityId(e.target.value)}
+          >
+            <option value="">
+              沿用默认身份{defaultIdentity ? `（${defaultIdentity.name}）` : ""}
+            </option>
+            {identities.map(identity => (
+              <option key={identity.id} value={identity.id}>
+                {identity.name}{identity.occupation ? ` · ${identity.occupation}` : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+        <p className="wt-paper-hint">
+          {identities.length === 0
+            ? "还没有用户身份，先到「设置 → 用户身份」建一份，这里就能选。"
+            : "切到这个世界时，聊天里「我」的名字、头像、资料都会换成这份身份。"}
+        </p>
+        <textarea
+          className="wt-paper-textarea"
+          style={{ minHeight: 64 }}
+          value={userPersona}
+          onChange={e => setUserPersona(e.target.value)}
+          placeholder="我在这个世界的设定（可选）：身份背景、和这里的人的关系、说话习惯…会注入给这个世界的所有角色。"
+        />
+
         <div className="wt-paper-actions">
           {!isDefault && (
             confirmDelete ? (

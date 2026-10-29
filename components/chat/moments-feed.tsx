@@ -64,6 +64,7 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
         window.addEventListener(USER_IDENTITIES_UPDATED_EVENT, syncIdentity);
         return () => window.removeEventListener(USER_IDENTITIES_UPDATED_EVENT, syncIdentity);
     }, []);
+    // 朋友圈里的「我」也按世界走（下面 world 定义之后会覆盖显示用的身份）
     const [editingSignature, setEditingSignature] = useState(false);
     const sigInputRef = useRef<HTMLInputElement>(null);
     const handleSignatureSubmit = (val: string) => {
@@ -109,6 +110,8 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
     const world = useChatWorld();
     const worldRef = useRef(world);
     worldRef.current = world;
+    // 朋友圈页头展示的「我」：跟当前世界绑定的身份走（没绑定就用默认身份）
+    const feedIdentity = world.userIdentity ?? userIdentity;
 
     const refreshPosts = useCallback(() => {
         const contactIds = new Set(loadChatContacts().map(c => c.characterId));
@@ -526,16 +529,16 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
                     >
                         {/* Avatar */}
                         <div className="feed-profile-avatar w-[72px] h-[72px] rounded-full border-[3px] border-[var(--c-page-body-bg)] bg-[var(--c-input)] overflow-hidden flex items-center justify-center translate-x-[2px] pointer-events-auto">
-                            {userIdentity?.avatarUrl ? (
-                                <img src={userIdentity.avatarUrl} alt="" className="feed-profile-avatar-image w-full h-full object-cover" />
+                            {feedIdentity?.avatarUrl ? (
+                                <img src={feedIdentity.avatarUrl} alt="" className="feed-profile-avatar-image w-full h-full object-cover" />
                             ) : (
-                                <span className="feed-profile-avatar-fallback ts-24 text-[var(--c-icon)] font-bold">{(userIdentity?.name ?? "我")[0]}</span>
+                                <span className="feed-profile-avatar-fallback ts-24 text-[var(--c-icon)] font-bold">{(feedIdentity?.name ?? "我")[0]}</span>
                             )}
                         </div>
                         
                         {/* Name and Flex Data */}
                         <div className="feed-profile-info flex flex-col gap-1 mt-3 ml-[6px] pointer-events-auto">
-                            <span className="feed-profile-name ts-20 font-bold text-[var(--c-text-title)]">{userIdentity?.name ?? "我"}</span>
+                            <span className="feed-profile-name ts-20 font-bold text-[var(--c-text-title)]">{feedIdentity?.name ?? "我"}</span>
                             <div className="feed-profile-stats flex gap-4 ts-13 text-[var(--c-icon)] font-medium mt-[2px]">
                                 <span className="feed-profile-stat"><strong className="feed-profile-stat-value text-[var(--c-text-title)]">128</strong> 关注</span>
                                 <span className="feed-profile-stat"><strong className="feed-profile-stat-value text-[var(--c-text-title)]">12.4K</strong> 粉丝</span>

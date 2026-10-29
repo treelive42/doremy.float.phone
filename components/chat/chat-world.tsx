@@ -12,9 +12,12 @@ import {
     DEFAULT_CHARACTER_WORLD_ID,
     getCurrentWorldId,
     loadCharacterWorldGroups,
+    resolveWorldUserIdentity,
     setCurrentWorldId,
     type CharacterWorldGroup,
 } from "@/lib/character-world-storage";
+import { USER_IDENTITIES_UPDATED_EVENT } from "@/lib/settings-storage";
+import type { UserIdentity } from "@/components/settings/user-identity";
 
 export type ChatWorldState = {
     /** 全部世界卷宗 */
@@ -33,6 +36,8 @@ export type ChatWorldState = {
     groupOfCharacter: (characterId?: string | null) => CharacterWorldGroup | null;
     /** 角色所属卷宗的名字（找不到时为空串） */
     worldNameOf: (characterId?: string | null) => string;
+    /** 这个世界里的「我」（世界绑定的用户身份；未绑定时为全局默认身份） */
+    userIdentity: UserIdentity | null;
 };
 
 export function useChatWorld(): ChatWorldState {
@@ -59,6 +64,18 @@ export function useChatWorld(): ChatWorldState {
         : DEFAULT_CHARACTER_WORLD_ID;
     const currentGroup = groups.find(group => group.id === currentWorldId) ?? null;
     const memberIds = useMemo(() => new Set(currentGroup?.memberIds ?? []), [currentGroup]);
+    // 这个世界里的「我」：世界改了绑定身份、或身份本身被编辑后都要重算
+    const [identityTick, bumpIdentityTick] = useState(0);
+    useEffect(() => {
+        const refreshIdentity = () => bumpIdentityTick(tick => tick + 1);
+        window.addEventListener(USER_IDENTITIES_UPDATED_EVENT, refreshIdentity);
+        return () => window.removeEventListener(USER_IDENTITIES_UPDATED_EVENT, refreshIdentity);
+    }, []);
+    const userIdentity = useMemo(
+        () => resolveWorldUserIdentity(currentWorldId),
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [currentWorldId, currentGroup?.userIdentityId, identityTick]
+    );
 
     function selectWorld(worldId: string) {
         setStoredWorldId(worldId);
@@ -90,6 +107,7 @@ export function useChatWorld(): ChatWorldState {
         isInCurrentWorld,
         groupOfCharacter,
         worldNameOf,
+        userIdentity,
     };
 }
 
