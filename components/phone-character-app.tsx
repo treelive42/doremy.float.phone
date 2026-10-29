@@ -39,7 +39,7 @@ import {
   type CharacterWorldGroup,
   type CharacterWorldUserCard,
 } from "@/lib/character-world-storage";
-import { loadUserIdentities } from "@/lib/settings-storage";
+import { loadUserIdentities, USER_IDENTITIES_UPDATED_EVENT } from "@/lib/settings-storage";
 import { WorldTabStrip, WorldCaseSheet, NewWorldSheet } from "@/components/character/world-tabs";
 import { RelationLinkDialog, RelationPairSheet } from "@/components/character/relation-dialogs";
 import { loadMomentsConfig, saveMomentsConfig } from "@/lib/moments-storage";
@@ -225,6 +225,12 @@ export function PhoneCharacterApp({ onClose, onNotice }: PhoneCharacterAppProps)
       window.removeEventListener(CHARACTER_WORLDS_UPDATED_EVENT, reload);
       window.removeEventListener(CURRENT_WORLD_CHANGED_EVENT, reloadCurrent);
     };
+  }, []);
+  // 设置里改了用户身份，「这个世界的我」候选与档案卡要跟着刷新
+  useEffect(() => {
+    const refreshIdentities = () => setIdentities(loadUserIdentities());
+    window.addEventListener(USER_IDENTITIES_UPDATED_EVENT, refreshIdentities);
+    return () => window.removeEventListener(USER_IDENTITIES_UPDATED_EVENT, refreshIdentities);
   }, []);
   // 记忆的世界可能已被删除 → 回落默认卷宗
   const safeWorldId = worldGroups.some(g => g.id === currentWorldId) ? currentWorldId : DEFAULT_CHARACTER_WORLD_ID;

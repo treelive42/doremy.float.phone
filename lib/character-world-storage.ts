@@ -474,7 +474,13 @@ export function formatCharacterRelationsForPrompt(characterId: string): string {
     const group = groups.find(item => item.memberIds.includes(characterId)) ?? null;
     if (!group) return "";
     const worldDescription = group.description.trim();
-    const hasWorldSetup = groups.length > 1 || group.id !== DEFAULT_CHARACTER_WORLD_ID || group.relations.length > 0 || Boolean(worldDescription);
+    const hasWorldSetup = groups.length > 1
+        || group.id !== DEFAULT_CHARACTER_WORLD_ID
+        || group.relations.length > 0
+        || Boolean(worldDescription)
+        // 只在默认世界、但给「我」配了身份或自我设定时，也要注入
+        || Boolean(group.userIdentityId)
+        || Boolean(group.userPersona?.trim());
     if (!hasWorldSetup) return "";
 
     const characters = loadCharacters();
