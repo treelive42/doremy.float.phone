@@ -103,10 +103,25 @@ export function ChatWorldSwitcher({ state }: { state: ChatWorldState }) {
 
     return (
         <>
+            {/* 不依赖主题按钮类的显式样式：任何配色/字号下都能看见这个入口 */}
             <button
                 type="button"
-                className="ui-btn ui-btn-ghost ts-13"
-                style={{ padding: "4px 10px", borderRadius: 999, whiteSpace: "nowrap", flexShrink: 0 }}
+                style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
+                    flexShrink: 0,
+                    padding: "5px 11px",
+                    borderRadius: 999,
+                    border: "1px solid var(--c-card-border, rgba(128,128,128,0.35))",
+                    background: "color-mix(in srgb, var(--c-action-blue, #246bfd) 12%, transparent)",
+                    color: "var(--c-text-title)",
+                    fontSize: "calc(13px*var(--app-text-scale, 1))",
+                    fontWeight: 600,
+                    lineHeight: 1.2,
+                    whiteSpace: "nowrap",
+                    cursor: "pointer",
+                }}
                 onClick={() => setOpen(true)}
                 title="切换世界：只显示该世界下的人物"
             >
