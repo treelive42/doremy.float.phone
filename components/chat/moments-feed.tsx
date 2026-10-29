@@ -114,10 +114,15 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
         const contactIds = new Set(loadChatContacts().map(c => c.characterId));
         const world = worldRef.current;
         setPosts(getAllPosts().filter(p => {
-            if (p.authorType === "user") return true;
-            if (!contactIds.has(p.authorId)) return false;
-            // 世界隔离：朋友圈也只显示当前世界的角色动态
-            return world.isolationActive ? world.memberIds.has(p.authorId) : true;
+            if (!world.isolationActive) return p.authorType === "user" || contactIds.has(p.authorId);
+            if (p.authorType === "character") {
+                // 角色动态：作者必须在自己好友里，且属于当前世界
+                return contactIds.has(p.authorId) && world.memberIds.has(p.authorId);
+            }
+            // 用户自己的动态：优先按发帖时记录的世界归属；老数据没有 worldId 时，
+            // 退化为「可见范围里有没有当前世界的角色」——没有就不算这个世界的帖子。
+            if (p.worldId) return p.worldId === world.currentWorldId;
+            return p.visibility.some(id => world.memberIds.has(id));
         }));
         setUnreadNotifs(getUnreadMomentsNotifications());
     }, []);

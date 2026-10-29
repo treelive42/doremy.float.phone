@@ -18,6 +18,11 @@ export type MomentPost = {
     location?: string;              // 用户添加的地点
     likes: MomentLike[];
     createdAt: string;              // ISO date string
+    /**
+     * 发帖时所在的「世界卷宗」id（世界隔离用）。
+     * 向后兼容：老数据没有这个字段，读取时按 visibility 里的角色归属推断。
+     */
+    worldId?: string;
 };
 
 export type MomentLike = {

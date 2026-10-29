@@ -8,6 +8,7 @@ import { onUserPost } from "@/lib/moments-engine";
 import { resolveUserIdentity } from "@/lib/settings-storage";
 import { saveChatImageToIndexedDB, getChatImageFromIndexedDB } from "@/lib/chat-asset-storage";
 import { ChatFallbackAvatar } from "./chat-fallback-avatar";
+import { useChatWorld } from "./chat-world";
 
 type Props = {
     onClose: () => void;
@@ -28,13 +29,19 @@ export function MomentsCompose({ onClose, onPublished }: Props) {
     const [showLocation, setShowLocation] = useState(false);
     const [showVisibility, setShowVisibility] = useState(false);
 
+    // 世界隔离：发朋友圈只涉及当前世界的联系人，默认可见范围也限定在该世界内，
+    // 避免「1World 的帖子发给了 2World 的人」。
+    const world = useChatWorld();
+
     const [visibility, setVisibility] = useState<Record<string, boolean>>(() => {
         const contacts = loadChatContacts();
         const chars = loadCharacters();
         const map: Record<string, boolean> = {};
         contacts.forEach(c => {
             const char = chars.find(ch => ch.id === c.characterId);
-            if (char) map[c.characterId] = true;
+            if (!char) return;
+            if (!world.isInCurrentWorld(char.id)) return;
+            map[c.characterId] = true;
         });
         return map;
     });
@@ -47,7 +54,9 @@ export function MomentsCompose({ onClose, onPublished }: Props) {
 
     const enrichedContacts = contacts
         .map(c => ({ ...c, char: chars.find(ch => ch.id === c.characterId) }))
-        .filter(c => c.char);
+        .filter(c => c.char)
+        // 世界隔离：@提醒、谁可以看等列表只列当前世界的联系人
+        .filter(c => world.isInCurrentWorld(c.characterId));
 
     const visibleCount = Object.values(visibility).filter(Boolean).length;
     const isAllSelected = enrichedContacts.length > 0 && enrichedContacts.every(c => visibility[c.characterId]);
@@ -164,7 +173,9 @@ export function MomentsCompose({ onClose, onPublished }: Props) {
 
         const visibleCharIds = Object.entries(visibility)
             .filter(([, v]) => v)
-            .map(([k]) => k);
+            .map(([k]) => k)
+            // 双保险：即使用户在别处切了世界，也不把别的世界的角色写进可见范围
+            .filter(id => world.isInCurrentWorld(id));
 
         const post = addMomentPost({
             authorType: "user",
@@ -174,6 +185,8 @@ export function MomentsCompose({ onClose, onPublished }: Props) {
             photoDescription: photoDesc.trim() || undefined,
             visibility: visibleCharIds,
             location: location || undefined,
+            // 记下发帖时所在的世界：不同世界的朋友圈互相看不见
+            worldId: world.currentWorldId,
         });
 
         if (post) {

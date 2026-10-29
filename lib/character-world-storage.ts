@@ -307,7 +307,13 @@ export function areCharactersInSameWorld(firstCharacterId: string, secondCharact
 }
 
 export function canCharacterSeeMomentPost(post: MomentPost, viewerCharacterId: string): boolean {
-    if (post.authorType === "user") return post.visibility.includes(viewerCharacterId);
+    if (post.authorType === "user") {
+        if (!post.visibility.includes(viewerCharacterId)) return false;
+        // 世界隔离：用户在某个世界发的动态，别的世界的角色不参与（不评论、不点赞）。
+        // 没有 worldId 的老数据沿用旧的「只看可见范围」行为。
+        if (post.worldId) return getCharacterWorldGroupId(viewerCharacterId) === post.worldId;
+        return true;
+    }
     if (post.authorId === viewerCharacterId) return true;
     return post.visibility.includes(viewerCharacterId) && areCharactersInSameWorld(post.authorId, viewerCharacterId);
 }
