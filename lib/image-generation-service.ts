@@ -2,7 +2,7 @@ import type { ImageGenerationSettings, NovelAiPreset } from "./settings-types";
 import { loadBindingConfig, loadImageGenerationSettings, resolveBinding, DEFAULT_NOVELAI_PRESET } from "./settings-storage";
 import { applyImageGenerationBinding } from "./image-generation-binding";
 import JSZip from "jszip";
-import { USER_FACE_REFERENCE_ID, withUserFacePrompt } from "./user-face-reference";
+import { USER_FACE_REFERENCE_ID } from "./user-face-reference";
 import { getChatImageFromIndexedDB } from "./chat-asset-storage";
 import { storeMediaBlob } from "./media-cache-storage";
 import { throwIfAborted } from "./abort-utils";
@@ -23,8 +23,15 @@ export type ImageGenerationResult = {
   mimeType: string;
   prompt: string;
   usedReferenceImage: boolean;
+  /** 实际提交的参考图数量（≥2 表示合照多人锁脸生效） */
+  usedReferenceCount?: number;
   revisedPrompt?: string;
 };
+
+/** 描述里是否明显把「我」画进了画面（合照、我们一起、自拍…），用于自动附加用户锁脸。 */
+function mentionsUserInFrame(description: string): boolean {
+  return /(合照|合影|一起|我们|咱俩|你和我|我和你|自拍|同框|抱着|依偎|身边|枕边|牵|吻|双人)/.test(description);
+}
 
 type ExtractedImage =
   | { kind: "b64"; b64: string; mimeType?: string; revisedPrompt?: string }
@@ -337,32 +344,80 @@ export async function fetchImageGenerationModels(settings: Pick<ImageGenerationS
 // 留空 = 关闭,沿用 Netlify 心跳流式路由。自部署请配置自己的代理地址。
 export const IMAGE_GEN_PROXY_URL = (process.env.NEXT_PUBLIC_IMAGE_GEN_PROXY_URL || "").trim().replace(/\/+$/, "");
 
+/** 多张参考图提交时的字段名候选：不同中转站认的名不一样，失败就换下一个。 */
+const REFERENCE_FIELD_CANDIDATES = ["image", "image[]", "image[0]"] as const;
+
 async function generateImageDirect(params: {
   settings: ImageGenerationSettings;
   prompt: string;
-  referenceImageDataUrl: string | null;
+  /** 参考图（0 张 = 纯文生图；多张 = 合照多人锁脸）。第一张视为「主参考」。 */
+  referenceImages: string[];
   signal?: AbortSignal;
   /** 走通用代理:请求发往代理地址,真实上游放进 x-upstream-base-url 头 */
   proxyBaseUrl?: string;
 }): Promise<ImageGenerationApiResponse> {
-  const { settings, prompt, referenceImageDataUrl, signal, proxyBaseUrl } = params;
+  const { settings, prompt, signal, proxyBaseUrl } = params;
+  const referenceImages = params.referenceImages.filter(Boolean);
   throwIfAborted(signal);
-  const hasReference = Boolean(referenceImageDataUrl);
+  const hasReference = referenceImages.length > 0;
   const url = buildImageUrl(proxyBaseUrl || settings.baseUrl, hasReference ? "edits" : "generations");
   const headers: Record<string, string> = { Authorization: `Bearer ${settings.apiKey}` };
   if (proxyBaseUrl) headers["x-upstream-base-url"] = normalizeBaseUrl(settings.baseUrl);
   let body: BodyInit;
 
   if (hasReference) {
-    const converted = dataUrlToBlob(referenceImageDataUrl || "");
-    if (!converted) throw new Error("参考图格式无效");
-    const form = new FormData();
-    form.set("model", settings.model);
-    form.set("prompt", prompt);
-    if (settings.size && settings.size !== "auto") form.set("size", settings.size);
-    if (settings.quality && settings.quality !== "auto") form.set("quality", settings.quality);
-    form.append("image", converted.blob, `reference.${imageExtension(converted.mimeType)}`);
-    body = form;
+    // 多张参考图：按候选字段名依次尝试（有的中转只认 image，有的只认 image[]），
+    // 全失败再退回只用主参考图，保证「合照锁不住两个人」时至少主角色锁得住。
+    const fields = referenceImages.length > 1
+      ? [...REFERENCE_FIELD_CANDIDATES]
+      : (["image"] as const);
+    let lastError: unknown = null;
+    for (const field of fields) {
+      const form = new FormData();
+      form.set("model", settings.model);
+      form.set("prompt", prompt);
+      if (settings.size && settings.size !== "auto") form.set("size", settings.size);
+      if (settings.quality && settings.quality !== "auto") form.set("quality", settings.quality);
+      referenceImages.forEach((dataUrl, index) => {
+        const converted = dataUrlToBlob(dataUrl);
+        if (!converted) return;
+        const name = `reference${index + 1}.${imageExtension(converted.mimeType)}`;
+        // 单张时字段名固定 image；多张时第一张也用当前候选名，保证同一套写法
+        form.append(field, converted.blob, name);
+      });
+      try {
+        return await parseImageGenerationResponse(
+          await fetch(url, { method: "POST", headers, body: form, signal }),
+          signal,
+        );
+      } catch (error) {
+        lastError = error;
+        throwIfAborted(signal);
+        const message = error instanceof Error ? error.message : String(error);
+        // 只有「参考图被拒」类错误才换写法；其余（超时/断网/key 错）直接抛
+        const retryable = /\b(400|415|422)\b/.test(message) && /image|参考|form|upload|multipart/i.test(message);
+        if (!retryable) throw error;
+      }
+    }
+    // 所有写法都失败：退回只用主参考图再试一次
+    if (referenceImages.length > 1) {
+      const form = new FormData();
+      form.set("model", settings.model);
+      form.set("prompt", prompt);
+      if (settings.size && settings.size !== "auto") form.set("size", settings.size);
+      if (settings.quality && settings.quality !== "auto") form.set("quality", settings.quality);
+      const primary = dataUrlToBlob(referenceImages[0]);
+      if (primary) form.append("image", primary.blob, `reference.${imageExtension(primary.mimeType)}`);
+      try {
+        return await parseImageGenerationResponse(
+          await fetch(url, { method: "POST", headers, body: form, signal }),
+          signal,
+        );
+      } catch {
+        throw lastError instanceof Error ? lastError : new Error(String(lastError));
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error("参考图提交失败");
   } else {
     headers["Content-Type"] = "application/json";
     body = JSON.stringify({
@@ -408,7 +463,7 @@ const directCorsFailedBaseUrls = new Set<string>();
 async function generateImageViaServerOrProxy(params: {
   settings: ImageGenerationSettings;
   prompt: string;
-  referenceImageDataUrl: string | null;
+  referenceImages: string[];
   signal?: AbortSignal;
 }): Promise<ImageGenerationApiResponse> {
   if (IMAGE_GEN_PROXY_URL) {
@@ -441,10 +496,10 @@ async function generateImageViaServerOrProxy(params: {
 async function generateImageViaServer(params: {
   settings: ImageGenerationSettings;
   prompt: string;
-  referenceImageDataUrl: string | null;
+  referenceImages: string[];
   signal?: AbortSignal;
 }): Promise<ImageGenerationApiResponse> {
-  const { settings, prompt, referenceImageDataUrl, signal } = params;
+  const { settings, prompt, referenceImages, signal } = params;
   throwIfAborted(signal);
   // 防"无限卡住":函数被平台中途击杀时流可能既不关闭也不报错。
   // 总超时 180s + 断流检测(心跳每 3s 一个字节,超过 25s 没有任何字节视为断流)。
@@ -466,7 +521,9 @@ async function generateImageViaServer(params: {
         prompt,
         size: settings.size,
         quality: settings.quality,
-        referenceImageDataUrl: referenceImageDataUrl || undefined,
+        // 兼容旧字段（第一张）+ 新字段（多张，合照多人锁脸）
+        referenceImageDataUrl: referenceImages[0] || undefined,
+        referenceImageDataUrls: referenceImages.length > 1 ? referenceImages : undefined,
       }),
     });
     throwIfAborted(signal);
@@ -752,6 +809,11 @@ export async function generateImageFromConfiguredApi(params: {
    * 不传 characterId 时也会自动指向用户参考图。
    */
   useUserReference?: boolean;
+  /**
+   * 额外一起锁脸的角色 id（合照多人锁脸）：
+   * 与 characterId / 用户参考图一起提交，最多建议 3 张。
+   */
+  extraReferenceIds?: string[];
   settings?: ImageGenerationSettings;
   signal?: AbortSignal;
 }): Promise<ImageGenerationResult | null> {
@@ -771,11 +833,9 @@ export async function generateImageFromConfiguredApi(params: {
   const referenceSubjectId = params.useUserReference
     ? USER_FACE_REFERENCE_ID
     : params.characterId;
-  const description = params.useUserReference
-    ? withUserFacePrompt(rawDescription, true)
-    : params.characterId
-      ? rawDescription
-      : withUserFacePrompt(rawDescription);
+  // 外观提示词统一在下面的「锁定谁的脸」环节按 subject 追加，这里只用原始描述，
+  // 避免用户特征被拼两次。
+  const description = rawDescription;
 
   // NovelAI 模式
   if (settings.provider === "novelai") {
@@ -789,13 +849,23 @@ export async function generateImageFromConfiguredApi(params: {
 
     const positiveParts: string[] = [];
     if (activePreset.positivePrompt?.trim()) positiveParts.push(activePreset.positivePrompt.trim());
-    const novelAiCharacterReference = referenceSubjectId
-      ? settings.characterReferences?.[referenceSubjectId]
-      : undefined;
-    const characterFeaturePrompt = novelAiCharacterReference?.novelAiFeaturePromptEnabled !== false
-      ? novelAiCharacterReference?.featurePrompt?.trim()
-      : "";
-    if (characterFeaturePrompt) positiveParts.push(characterFeaturePrompt);
+    // NovelAI 不读参考图，但可以用「人物特征提示词」锁外观；
+    // 合照时把用户的特征和角色的特征一起拼进去（多人同框靠提示词描述人名分工）。
+    const naiSubjectIds: string[] = [];
+    if (referenceSubjectId) naiSubjectIds.push(referenceSubjectId);
+    for (const extraId of params.extraReferenceIds ?? []) {
+      if (extraId && !naiSubjectIds.includes(extraId)) naiSubjectIds.push(extraId);
+    }
+    if (params.useUserReference && !naiSubjectIds.includes(USER_FACE_REFERENCE_ID)) {
+      naiSubjectIds.push(USER_FACE_REFERENCE_ID);
+    }
+    for (const subjectId of naiSubjectIds) {
+      const subjectRef = settings.characterReferences?.[subjectId];
+      if (!subjectRef || subjectRef.enabled === false) continue;
+      if (subjectRef.novelAiFeaturePromptEnabled === false) continue;
+      const feature = subjectRef.featurePrompt?.trim();
+      if (feature) positiveParts.push(feature);
+    }
     if (description) positiveParts.push(description);
     const fullPrompt = positiveParts.join(", ");
 
@@ -827,31 +897,67 @@ export async function generateImageFromConfiguredApi(params: {
   const openaiSettings = openaiPreset ? { ...settings, ...openaiPreset } : settings;
   if (!openaiSettings.apiKey.trim() || !openaiSettings.baseUrl.trim() || !openaiSettings.model.trim()) return null;
 
-  const reference = referenceSubjectId ? settings.characterReferences?.[referenceSubjectId] : undefined;
+  // ── 锁定谁的脸：支持同框多人（合照）──
+  // 主参考（第一张）决定 edits 接口的主体；其余作为附加参考图一起提交。
+  const subjectIds: string[] = [];
+  const primaryId = referenceSubjectId;
+  if (primaryId) subjectIds.push(primaryId);
+  for (const extraId of params.extraReferenceIds ?? []) {
+    if (extraId && !subjectIds.includes(extraId)) subjectIds.push(extraId);
+  }
+  // 角色出镜 + 描述里明显带「我」（合照/我们一起…）时，自动把用户的脸也一起锁上。
+  // 只有在用户确实配了参考图或外观提示词时才自动介入，避免影响纯角色出图。
+  const userRef = settings.characterReferences?.[USER_FACE_REFERENCE_ID];
+  const userRefUsable = Boolean(userRef && userRef.enabled !== false && (userRef.assetId || userRef.featurePrompt?.trim()));
+  const wantsUserInFrame = userRefUsable && (
+    params.useUserReference
+    || (!primaryId && !params.characterId)
+    || (
+      userRef?.autoInGroupPhoto !== false
+      && Boolean(primaryId)
+      && primaryId !== USER_FACE_REFERENCE_ID
+      && mentionsUserInFrame(rawDescription)
+    )
+  );
+  if (wantsUserInFrame && !subjectIds.includes(USER_FACE_REFERENCE_ID)) {
+    subjectIds.push(USER_FACE_REFERENCE_ID);
+  }
+
   // 「非自拍不使用参考图」开关已从生图设置页删除：参考图启用后始终参与生成。
   // 明确指出「画的是我」时（useUserReference），默认就要锁脸，不必再传 useReferenceImage。
   const shouldUseReference = Boolean(
-    (params.useReferenceImage || (params.useUserReference && !params.characterId))
-    && reference?.assetId
-    && reference.enabled !== false,
+    params.useReferenceImage
+    || params.useUserReference
+    || wantsUserInFrame
+    || (params.extraReferenceIds?.length ?? 0) > 0,
   );
-  const rawReferenceImageDataUrl = shouldUseReference && reference?.assetId
-    ? await getChatImageFromIndexedDB(reference.assetId)
-    : null;
-  throwIfAborted(params.signal);
-  const referenceImageDataUrl = rawReferenceImageDataUrl
-    ? await normalizeReferenceImageForEdit(rawReferenceImageDataUrl, reference?.faceCrop)
-    : null;
-  throwIfAborted(params.signal);
-  const characterPrompt = reference?.featurePrompt?.trim() || "";
+
+  const referenceImages: string[] = [];
+  const appearanceLines: string[] = [];
+  for (const subjectId of subjectIds) {
+    const subjectRef = settings.characterReferences?.[subjectId];
+    if (!subjectRef || subjectRef.enabled === false) continue;
+    const isUserSubject = subjectId === USER_FACE_REFERENCE_ID;
+    const label = isUserSubject ? "用户固定外观" : "角色固定外观";
+    const feature = subjectRef.featurePrompt?.trim();
+    if (feature) appearanceLines.push(`【${label}】${feature}`);
+    if (!shouldUseReference || !subjectRef.assetId) continue;
+    const rawDataUrl = await getChatImageFromIndexedDB(subjectRef.assetId);
+    throwIfAborted(params.signal);
+    if (!rawDataUrl) continue;
+    const normalized = await normalizeReferenceImageForEdit(rawDataUrl, subjectRef.faceCrop);
+    throwIfAborted(params.signal);
+    if (normalized && !referenceImages.includes(normalized)) referenceImages.push(normalized);
+  }
+
   const prompt = mergePrompt(
-    characterPrompt ? `${description}\n\n【角色固定外观】${characterPrompt}` : description,
+    appearanceLines.length > 0 ? `${description}\n\n${appearanceLines.join("\n")}` : description,
     openaiSettings.extraPrompt,
   );
 
   const data = openaiSettings.requestMode === "direct"
-    ? await generateImageDirect({ settings: openaiSettings, prompt, referenceImageDataUrl, signal: params.signal })
-    : await generateImageViaServerOrProxy({ settings: openaiSettings, prompt, referenceImageDataUrl, signal: params.signal });
+    ? await generateImageDirect({ settings: openaiSettings, prompt, referenceImages, signal: params.signal })
+    : await generateImageViaServerOrProxy({ settings: openaiSettings, prompt, referenceImages, signal: params.signal });
 
   throwIfAborted(params.signal);
   const mimeType = data.mimeType || "image/png";
@@ -865,7 +971,8 @@ export async function generateImageFromConfiguredApi(params: {
     blob,
     mimeType,
     prompt,
-    usedReferenceImage: Boolean(referenceImageDataUrl),
+    usedReferenceImage: referenceImages.length > 0,
+    usedReferenceCount: referenceImages.length,
     revisedPrompt: data.revisedPrompt,
   };
 }

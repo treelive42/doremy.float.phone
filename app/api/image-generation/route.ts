@@ -25,6 +25,8 @@ type ImageGenerationRequest = {
   size?: string;
   quality?: string;
   referenceImageDataUrl?: string;
+  /** 合照多人锁脸：多张参考图（第一张为主参考）。旧客户端只传上面那个字段。 */
+  referenceImageDataUrls?: string[];
   // NovelAI 专属参数
   negativePrompt?: string;
   steps?: number;
@@ -301,7 +303,13 @@ async function runImageGeneration(input: ImageGenerationRequest): Promise<{ stat
     const baseUrl = input.baseUrl?.trim();
     const model = input.model?.trim();
     const prompt = input.prompt?.trim();
-    const hasReference = Boolean(input.referenceImageDataUrl?.trim());
+    // 参考图：优先多张字段，回落到旧的单张字段；单张时行为与旧版一致
+    const incomingReferences = (input.referenceImageDataUrls?.length
+      ? input.referenceImageDataUrls
+      : [input.referenceImageDataUrl])
+      .filter((value): value is string => Boolean(value && value.trim()))
+      .slice(0, 4);
+    const hasReference = incomingReferences.length > 0;
 
     if (!apiKey) return { status: 400, body: { error: "缺少 API Key" } };
     if (!baseUrl) return { status: 400, body: { error: "缺少 Base URL" } };
@@ -310,49 +318,123 @@ async function runImageGeneration(input: ImageGenerationRequest): Promise<{ stat
 
     const url = buildImageUrl(baseUrl, hasReference ? "edits" : "generations");
     const headers: Record<string, string> = { Authorization: `Bearer ${apiKey}` };
-    let body: BodyInit;
 
-    if (hasReference) {
-      const converted = dataUrlToBlob(input.referenceImageDataUrl || "");
-      if (!converted) return { status: 400, body: { error: "参考图格式无效" } };
+    // 构建 multipart：多张参考图时字段名按候选依次尝试，全部失败再退回只用主参考图，
+    // 保证「合照锁不住两个人」时至少主角色锁得住（不同中转站认的字段名不一致）。
+    const buildForm = (field: string, refs: string[]): FormData | null => {
       const form = new FormData();
       form.set("model", model);
       form.set("prompt", prompt);
       if (input.size && input.size !== "auto") form.set("size", input.size);
       if (input.quality && input.quality !== "auto") form.set("quality", input.quality);
-      form.append("image", converted.blob, `reference.${converted.mimeType.split("/")[1] || "png"}`);
-      body = form;
-    } else {
+      for (const [index, dataUrl] of refs.entries()) {
+        const converted = dataUrlToBlob(dataUrl);
+        if (!converted) return null;
+        form.append(field, converted.blob, `reference${index + 1}.${converted.mimeType.split("/")[1] || "png"}`);
+      }
+      return form;
+    };
+
+    // 没有参考图：纯文生图，走 generations + JSON（与旧版完全一致）
+    if (!hasReference) {
       headers["Content-Type"] = "application/json";
-      body = JSON.stringify({
+      const jsonBody = JSON.stringify({
         model,
         prompt,
         ...(input.size && input.size !== "auto" ? { size: input.size } : {}),
         ...(input.quality && input.quality !== "auto" ? { quality: input.quality } : {}),
       });
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 120_000);
+      let plainRes: Response;
+      try {
+        plainRes = await externalFetch(url, { method: "POST", headers, body: jsonBody, signal: controller.signal });
+      } finally {
+        clearTimeout(timeout);
+      }
+      const plainType = (plainRes.headers.get("content-type") || "").toLowerCase();
+      if (!plainRes.ok) {
+        const errText = await plainRes.text().catch(() => "");
+        return { status: 502, body: { error: `生图 API 错误 ${plainRes.status}: ${errText.slice(0, 600)}` } };
+      }
+      if (plainType.startsWith("image/")) {
+        const buffer = Buffer.from(await plainRes.arrayBuffer());
+        return { status: 200, body: { b64: buffer.toString("base64"), mimeType: plainType } };
+      }
+      const plainJson = await plainRes.json();
+      const plainExtracted = extractFromObject(plainJson);
+      if (!plainExtracted) {
+        return { status: 502, body: { error: `生图 API 返回中没有找到图片字段：${JSON.stringify(Object.keys(plainJson || {})).slice(0, 200)}` } };
+      }
+      if (plainExtracted.kind === "url") {
+        const downloaded = await fetchImageUrl(plainExtracted.url);
+        return { status: 200, body: { ...downloaded, revisedPrompt: plainExtracted.revisedPrompt } };
+      }
+      return {
+        status: 200,
+        body: {
+          b64: plainExtracted.b64,
+          mimeType: plainExtracted.mimeType || "image/png",
+          revisedPrompt: plainExtracted.revisedPrompt,
+        },
+      };
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120_000);
-    let res: Response;
-    try {
-      res = await externalFetch(url, { method: "POST", headers, body, signal: controller.signal });
-    } finally {
-      clearTimeout(timeout);
+    const FIELD_CANDIDATES = incomingReferences.length > 1
+      ? ["image[]", "image", "image[0]"]
+      : ["image"];
+
+    let res: Response | null = null;
+    let lastErrorText = "";
+    for (const field of FIELD_CANDIDATES) {
+      const form = buildForm(field, incomingReferences);
+      if (!form) return { status: 400, body: { error: "参考图格式无效" } };
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 120_000);
+      try {
+        res = await externalFetch(url, { method: "POST", headers, body: form, signal: controller.signal });
+      } finally {
+        clearTimeout(timeout);
+      }
+      if (res.ok) break;
+      lastErrorText = await res.text().catch(() => "");
+      // 只在「参考图字段被拒」时换写法；其他错误立刻返回
+      const retryable = (res.status === 400 || res.status === 415 || res.status === 422)
+        && /image|参考|form|multipart|upload/i.test(lastErrorText);
+      if (!retryable) {
+        return { status: 502, body: { error: `生图 API 错误 ${res.status}: ${lastErrorText.slice(0, 600)}` } };
+      }
+      res = null;
+    }
+    if (!res) {
+      // 多张全失败：退回主参考图（合照退化为单人锁脸）
+      const fallbackForm = buildForm("image", [incomingReferences[0]]);
+      if (!fallbackForm) return { status: 400, body: { error: "参考图格式无效" } };
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 120_000);
+      try {
+        res = await externalFetch(url, { method: "POST", headers, body: fallbackForm, signal: controller.signal });
+      } finally {
+        clearTimeout(timeout);
+      }
     }
 
-    const contentType = (res.headers.get("content-type") || "").toLowerCase();
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      return { status: 502, body: { error: `生图 API 错误 ${res.status}: ${errText.slice(0, 600)}` } };
+    if (!res) {
+      return { status: 502, body: { error: `生图 API 错误：参考图多次提交均失败 ${lastErrorText.slice(0, 400)}` } };
+    }
+    const finalRes: Response = res;
+    const contentType = (finalRes.headers.get("content-type") || "").toLowerCase();
+    if (!finalRes.ok) {
+      const errText = await finalRes.text().catch(() => "");
+      return { status: 502, body: { error: `生图 API 错误 ${finalRes.status}: ${errText.slice(0, 600)}` } };
     }
 
     if (contentType.startsWith("image/")) {
-      const buffer = Buffer.from(await res.arrayBuffer());
+      const buffer = Buffer.from(await finalRes.arrayBuffer());
       return { status: 200, body: { b64: buffer.toString("base64"), mimeType: contentType } };
     }
 
-    const json = await res.json();
+    const json = await finalRes.json();
     const extracted = extractFromObject(json);
     if (!extracted) {
       return { status: 502, body: { error: `生图 API 返回中没有找到图片字段：${JSON.stringify(Object.keys(json || {})).slice(0, 200)}` } };

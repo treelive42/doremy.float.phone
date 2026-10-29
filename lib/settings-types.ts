@@ -253,6 +253,11 @@ export type ImageGenerationSettings = {
         enabled?: boolean;
         /** 开启时，仅自拍语义的图片使用参考图，默认开启。 */
         selfieOnly?: boolean;
+        /**
+         * 仅「我（用户）」参考图使用：描述里出现合照/一起/我们等字样时，
+         * 自动把这张脸也一起锁进画面。默认开启。
+         */
+        autoInGroupPhoto?: boolean;
         /** 归一化的正方形脸部选区。 */
         faceCrop?: {
             x: number;

@@ -1185,6 +1185,24 @@ export function ImageGenerationSettings() {
                                 )}
                             </div>
                         )}
+
+                        {isUserSelfSelected && (
+                            <div className="menu-item !px-0 !py-0">
+                                <span className="settings-tools-menu-copy">
+                                    <span className="menu-label appearance-menu-item-label">合照时自动带上我</span>
+                                    <span className="menu-desc settings-tools-menu-desc">
+                                        描述里出现「合照 / 一起 / 我们 / 自拍」等字样时，自动把我的脸和角色一起锁进画面。
+                                    </span>
+                                </span>
+                                <span className="menu-right settings-tools-menu-toggle">
+                                    <Toggle
+                                        checked={selectedEntryReference?.autoInGroupPhoto !== false}
+                                        onChange={(autoInGroupPhoto) => updateCharacterReference(USER_FACE_REFERENCE_ID, { autoInGroupPhoto })}
+                                        className="settings-toggle-control"
+                                    />
+                                </span>
+                            </div>
+                        )}
                     </div>
                 )}
             </div>
