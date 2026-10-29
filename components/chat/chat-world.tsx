@@ -10,13 +10,15 @@ import {
     CHARACTER_WORLDS_UPDATED_EVENT,
     CURRENT_WORLD_CHANGED_EVENT,
     DEFAULT_CHARACTER_WORLD_ID,
+    getCharacterWorldGroupId,
     getCurrentWorldId,
     loadCharacterWorldGroups,
     resolveWorldUserIdentity,
+    setCharacterWorldUserIdentity,
     setCurrentWorldId,
     type CharacterWorldGroup,
 } from "@/lib/character-world-storage";
-import { USER_IDENTITIES_UPDATED_EVENT } from "@/lib/settings-storage";
+import { USER_IDENTITIES_UPDATED_EVENT, loadUserIdentities, resolveUserIdentity } from "@/lib/settings-storage";
 import type { UserIdentity } from "@/components/settings/user-identity";
 
 export type ChatWorldState = {
@@ -112,12 +114,62 @@ export function useChatWorld(): ChatWorldState {
 }
 
 /**
- * 世界切换器：小胶囊 + 选择弹层。
- * 只有一个世界时渲染 null（单世界用户不需要这个概念）。
+ * 世界 / 「我」快捷切换器：小胶囊 + 选择弹层。
+ * 只有一个世界、且只有一个身份时渲染 null（单世界单身份用户不需要这个概念）。
+ *
+ * 传 characterId 时按「这个角色所属世界」读写身份绑定——在世界 A 的聊天室里
+ * 换「我」，不会误改世界 B 的绑定。不传则作用于当前世界。
  */
-export function ChatWorldSwitcher({ state }: { state: ChatWorldState }) {
+export function ChatWorldSwitcher({
+    state: providedState,
+    characterId,
+    compact,
+}: {
+    /** 显式传入的世界状态；不传则自己订阅（聊天室 / 剧情顶栏直接放一个就行） */
+    state?: ChatWorldState;
+    /** 正在看的角色：按它所属的世界解析、写入「我」的身份绑定 */
+    characterId?: string | null;
+    /** 紧凑模式：只显示一枚小胶囊，适合塞进聊天室 / 剧情顶栏 */
+    compact?: boolean;
+}) {
+    const hookState = useChatWorld();
+    const state = providedState ?? hookState;
     const [open, setOpen] = useState(false);
-    if (!state.isolationActive) return null;
+    // 身份列表：新增 / 改名 / 换头像后要跟着变
+    const [identityTick, bumpIdentityTick] = useState(0);
+    useEffect(() => {
+        const refresh = () => bumpIdentityTick(tick => tick + 1);
+        window.addEventListener(USER_IDENTITIES_UPDATED_EVENT, refresh);
+        return () => window.removeEventListener(USER_IDENTITIES_UPDATED_EVENT, refresh);
+    }, []);
+    const identities = useMemo(() => {
+        try { return loadUserIdentities(); } catch { return []; }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [identityTick, state.groups]);
+    // 身份绑定写在世界卷宗上：优先用角色所属世界，找不到才回落到当前世界
+    const targetWorldId = useMemo(
+        () => (characterId ? (getCharacterWorldGroupId(characterId) || state.currentWorldId) : state.currentWorldId),
+        [characterId, state.currentWorldId, state.groups],
+    );
+    const targetWorld = state.groups.find(group => group.id === targetWorldId) ?? state.currentGroup;
+    const activeIdentity = useMemo(() => {
+        try {
+            return characterId ? resolveUserIdentity(characterId) : resolveWorldUserIdentity(targetWorldId);
+        } catch {
+            return null;
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [characterId, targetWorldId, identityTick, state.groups]);
+    const canSwitchWorld = state.isolationActive;
+    const canSwitchUser = identities.length > 1;
+    if (!canSwitchWorld && !canSwitchUser) return null;
+    const worldLabel = targetWorld?.name || "默认世界";
+    const userLabel = activeIdentity?.name?.trim() || identities[0]?.name?.trim() || "用户";
+    // 紧凑模式只放一个标签，优先显示世界里换人这件事（身份比世界更难从界面看出来）
+    const pillLabel = compact
+        ? (canSwitchWorld ? `🌐 ${worldLabel}` : `👤 ${userLabel}`)
+        : `${canSwitchWorld ? `🌐 ${worldLabel}` : ""}${canSwitchWorld && canSwitchUser ? " · " : ""}${canSwitchUser ? `👤 ${userLabel}` : ""}`;
+    const pillTitle = `当前世界：${worldLabel} / 我：${userLabel}（点击切换）`;
 
     return (
         <>
@@ -139,21 +191,30 @@ export function ChatWorldSwitcher({ state }: { state: ChatWorldState }) {
                     lineHeight: 1.2,
                     whiteSpace: "nowrap",
                     cursor: "pointer",
+                    // 紧凑模式（聊天室 / 剧情顶栏）收小一点，别把标题挤掉
+                    ...(compact ? {
+                        maxWidth: 126,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        padding: "4px 9px",
+                        fontSize: "calc(11px*var(--app-text-scale, 1))",
+                    } : {}),
                 }}
                 onClick={() => setOpen(true)}
-                title="切换世界：只显示该世界下的人物"
+                title={pillTitle}
             >
-                🌐 {state.currentGroup?.name || "默认世界"}
+                {pillLabel}
             </button>
 
             {open && (
                 <div className="modal-overlay" onClick={() => setOpen(false)}>
                     <div className="modal-dialog" onClick={e => e.stopPropagation()}>
-                        <span className="modal-header-title">切换世界</span>
+                        <span className="modal-header-title">世界 / 我</span>
                         <p className="ts-12 text-[var(--c-text)] opacity-70 mb-3">
-                            切到哪份卷宗，聊天与通讯录就只显示那个世界的人物。世界的成员归置、关系与世界观描述在角色 App 的「世界卷宗」里编辑。
+                            切换世界只影响「看到哪些人物」，切换「我」决定角色眼里的你是谁。世界的成员归置、关系与世界观描述在角色 App 的「世界卷宗」里编辑。
                         </p>
-                        <div className="flex flex-col gap-2 w-full max-h-[45vh] overflow-y-auto mb-3">
+                        {canSwitchWorld && (
+                        <div className="flex flex-col gap-2 w-full max-h-[34vh] overflow-y-auto mb-3">
                             {state.groups.map(group => {
                                 const active = group.id === state.currentWorldId;
                                 return (
@@ -167,8 +228,8 @@ export function ChatWorldSwitcher({ state }: { state: ChatWorldState }) {
                                                 : "var(--c-input)",
                                         }}
                                         onClick={() => {
+                                            // 不关弹层：换完世界往往还要顺手换「我」
                                             state.selectWorld(group.id);
-                                            setOpen(false);
                                         }}
                                     >
                                         <div className="flex-1 overflow-hidden">
@@ -184,6 +245,62 @@ export function ChatWorldSwitcher({ state }: { state: ChatWorldState }) {
                                 );
                             })}
                         </div>
+                        )}
+
+                        {canSwitchUser && (
+                            <>
+                                <div className="ts-12 font-semibold text-[var(--c-text-title)] self-start mb-1">
+                                    这个世界的我{targetWorld ? `（${targetWorld.name}）` : ""}
+                                </div>
+                                <div className="flex flex-col gap-2 w-full max-h-[30vh] overflow-y-auto mb-2">
+                                    {identities.map(identity => {
+                                        const active = activeIdentity?.id === identity.id;
+                                        const facts = [identity.gender, identity.age, identity.occupation]
+                                            .filter((value): value is string => Boolean(value && value.trim()))
+                                            .join(" · ");
+                                        return (
+                                            <button
+                                                key={identity.id}
+                                                type="button"
+                                                className="flex items-center gap-3 p-3 rounded-lg text-left"
+                                                style={{
+                                                    background: active
+                                                        ? "color-mix(in srgb, var(--c-action-blue, #246bfd) 14%, transparent)"
+                                                        : "var(--c-input)",
+                                                }}
+                                                onClick={() => {
+                                                    setCharacterWorldUserIdentity(targetWorldId, identity.id);
+                                                    bumpIdentityTick(tick => tick + 1);
+                                                    setOpen(false);
+                                                }}
+                                            >
+                                                <span className="w-[32px] h-[32px] rounded-full overflow-hidden shrink-0 flex items-center justify-center bg-[var(--c-page-body-bg)]">
+                                                    {identity.avatarUrl ? (
+                                                        <img src={identity.avatarUrl} alt="" className="w-full h-full object-cover" />
+                                                    ) : (
+                                                        <span className="ts-12 font-semibold text-[var(--c-icon)]">
+                                                            {(identity.name || "我").slice(0, 1)}
+                                                        </span>
+                                                    )}
+                                                </span>
+                                                <div className="flex-1 overflow-hidden">
+                                                    <div className={`ts-14 truncate text-[var(--c-text-title)] ${active ? "font-bold" : "font-medium"}`}>
+                                                        {active ? "✓ " : ""}{identity.name || "未命名身份"}
+                                                    </div>
+                                                    <div className="ts-12 text-[var(--c-icon)] truncate mt-[2px]">
+                                                        {facts || identity.bio?.slice(0, 20) || "资料未填写"}
+                                                    </div>
+                                                </div>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                                <p className="ts-11 text-[var(--c-icon)] mb-3">
+                                    换「我」只改这个世界绑定的身份，历史记录里的文字不会重写。若角色或某个 APP 里单独绑定了「我」，以绑定设置为准。
+                                </p>
+                            </>
+                        )}
+
                         <button className="ui-btn ui-btn-ghost w-full" onClick={() => setOpen(false)}>
                             关闭
                         </button>

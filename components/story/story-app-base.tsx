@@ -49,6 +49,8 @@ import CSSSchemeBar from "@/components/ui/css-scheme-picker";
 import { Avatar } from "@/components/ui/primitives";
 import { StoryHtmlRenderer, type StoryVoiceSegment } from "@/components/ui/story-html-renderer";
 import { StorySettingsPage, STORY_DEFAULT_STATUS_RENDER, STORY_DEFAULT_THEATER_RENDER } from "@/components/story/story-settings-page";
+// 剧情顶栏的「世界 / 我」快捷切换：读写的是同一个「当前世界」与身份绑定
+import { ChatWorldSwitcher } from "@/components/chat/chat-world";
 import { loadCharacters } from "@/lib/character-storage";
 import { maybeRunSummarization } from "@/lib/memory-summarizer";
 import { incrementEventCounter } from "@/lib/memory-storage";
@@ -1996,6 +1998,8 @@ export function StoryApp({ onClose }: StoryAppProps) {
             </div>
             <div className="story-header-center" />
             <div className="story-header-right" style={{ gap: 8 }}>
+              {/* 多人剧情没有单一角色归属，按当前世界解析「我」 */}
+              <ChatWorldSwitcher compact characterId={activeGroup ? undefined : activeCharacterId} />
               <button className="story-top-btn" onClick={() => setQuickStoryOpen(true)} aria-label="快捷进入新剧情">
                 <PlusIcon width={16} height={16} />
               </button>

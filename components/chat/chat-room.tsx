@@ -77,6 +77,8 @@ import {
 } from "@/lib/generated-image-retry";
 import { scrollElementWithinContainer } from "@/lib/dom-scroll";
 import { ChatFallbackAvatar } from "./chat-fallback-avatar";
+// 聊天室顶栏的「世界 / 我」快捷切换：不用退回列表就能换世界、换自己是谁
+import { ChatWorldSwitcher } from "./chat-world";
 import { ChatScreenEffectOverlay, type ActiveScreenEffect } from "./chat-screen-effect";
 import {
     formatChatDiceResultMessage,
@@ -5855,7 +5857,9 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                             </span>
                         )}
                     </span>
-                    <span className="page-header-right">
+                    <span className="page-header-right" style={{ gap: 6 }}>
+                        {/* 群聊没有单一角色归属，按当前世界解析「我」 */}
+                        <ChatWorldSwitcher compact characterId={session.isGroup ? undefined : session.contactId} />
                         <button className="page-back-btn" type="button" onClick={() => setShowSettings(true)} aria-label="更多">
                             <MoreHorizontal size={22} strokeWidth={1.5} />
                         </button>
